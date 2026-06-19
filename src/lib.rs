@@ -101,17 +101,26 @@ impl TrayHost {
 
     /// Call the item's `Activate` method.
     pub fn activate(&mut self, id: &ItemId, x: i32, y: i32) -> Result<()> {
-        item::call_method(&mut self.conn, &id.0, "Activate", x, y)
+        let item = self.items.get(id).ok_or_else(|| crate::Error::Unmarshal(
+            rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
+        ))?;
+        item::call_method(&mut self.conn, &item.bus_name, &item.object_path, "Activate", x, y)
     }
 
     /// Call the item's `ContextMenu` method.
     pub fn context_menu(&mut self, id: &ItemId, x: i32, y: i32) -> Result<()> {
-        item::call_method(&mut self.conn, &id.0, "ContextMenu", x, y)
+        let item = self.items.get(id).ok_or_else(|| crate::Error::Unmarshal(
+            rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
+        ))?;
+        item::call_method(&mut self.conn, &item.bus_name, &item.object_path, "ContextMenu", x, y)
     }
 
     /// Call the item's `SecondaryActivate` method.
     pub fn secondary_activate(&mut self, id: &ItemId, x: i32, y: i32) -> Result<()> {
-        item::call_method(&mut self.conn, &id.0, "SecondaryActivate", x, y)
+        let item = self.items.get(id).ok_or_else(|| crate::Error::Unmarshal(
+            rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
+        ))?;
+        item::call_method(&mut self.conn, &item.bus_name, &item.object_path, "SecondaryActivate", x, y)
     }
 
     /// Get the menu layout for a tray item.
@@ -140,11 +149,14 @@ impl TrayHost {
 
     /// Call the item's `Scroll` method.
     pub fn scroll(&mut self, id: &ItemId, delta: i32, orientation: &str) -> Result<()> {
+        let item = self.items.get(id).ok_or_else(|| crate::Error::Unmarshal(
+            rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
+        ))?;
         let mut call = rustbus::MessageBuilder::new()
             .call("Scroll")
-            .on("/StatusNotifierItem")
-            .with_interface("org.freedesktop.StatusNotifierItem")
-            .at(&id.0)
+            .on(&item.object_path)
+            .with_interface("org.kde.StatusNotifierItem")
+            .at(&item.bus_name)
             .build();
         call.body.push_param(delta).unwrap();
         call.body.push_param(orientation).unwrap();

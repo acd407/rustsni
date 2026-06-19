@@ -26,12 +26,16 @@ pub struct TrayItem {
     pub bus_name: String,
     pub object_path: String,
     pub category: String,
+    pub item_id: String,
     pub title: String,
     pub status: String,
+    pub window_id: i32,
+    pub icon_theme_path: String,
     pub icon_name: String,
     pub icon_pixmaps: Vec<IconPixmap>,
     pub attention_icon_name: String,
     pub attention_icon_pixmaps: Vec<IconPixmap>,
+    pub attention_movie_name: String,
     pub overlay_icon_name: String,
     pub overlay_icon_pixmaps: Vec<IconPixmap>,
     pub item_is_menu: bool,
@@ -54,12 +58,16 @@ impl TrayItem {
             bus_name: bus_name.to_owned(),
             object_path: object_path.to_owned(),
             category: String::new(),
+            item_id: String::new(),
             title: String::new(),
             status: String::new(),
+            window_id: 0,
+            icon_theme_path: String::new(),
             icon_name: String::new(),
             icon_pixmaps: Vec::new(),
             attention_icon_name: String::new(),
             attention_icon_pixmaps: Vec::new(),
+            attention_movie_name: String::new(),
             overlay_icon_name: String::new(),
             overlay_icon_pixmaps: Vec::new(),
             item_is_menu: false,
@@ -68,13 +76,18 @@ impl TrayItem {
         };
 
         item.category = get_string(conn, bus_name, object_path, "Category").unwrap_or_default();
+        item.item_id = get_string(conn, bus_name, object_path, "Id").unwrap_or_default();
         item.title = get_string(conn, bus_name, object_path, "Title").unwrap_or_default();
         item.status = get_string(conn, bus_name, object_path, "Status").unwrap_or_default();
+        item.window_id = get_int(conn, bus_name, object_path, "WindowId").unwrap_or(0);
+        item.icon_theme_path = get_string(conn, bus_name, object_path, "IconThemePath").unwrap_or_default();
         item.icon_name = get_string(conn, bus_name, object_path, "IconName").unwrap_or_default();
         item.attention_icon_name =
             get_string(conn, bus_name, object_path, "AttentionIconName").unwrap_or_default();
         item.overlay_icon_name =
             get_string(conn, bus_name, object_path, "OverlayIconName").unwrap_or_default();
+        item.attention_movie_name =
+            get_string(conn, bus_name, object_path, "AttentionMovieName").unwrap_or_default();
         item.item_is_menu = get_bool(conn, bus_name, object_path, "ItemIsMenu").unwrap_or_default();
         item.menu_path = get_string(conn, bus_name, object_path, "Menu").unwrap_or_default();
         item.icon_pixmaps = get_pixmaps(conn, bus_name, object_path, "IconPixmap");
@@ -163,6 +176,16 @@ fn get_bool(conn: &mut DuplexConn, bus_name: &str, object_path: &str, prop: &str
     match val.get::<bool>() {
         Ok(b) => Ok(b),
         Err(_) => Ok(false),
+    }
+}
+
+fn get_int(conn: &mut DuplexConn, bus_name: &str, object_path: &str, prop: &str) -> Result<i32> {
+    let resp = call_get_property(conn, bus_name, object_path, prop)?;
+    let mut parser = resp.body.parser();
+    let val: rustbus::wire::unmarshal::traits::Variant = parser.get()?;
+    match val.get::<i32>() {
+        Ok(v) => Ok(v),
+        Err(_) => Ok(0),
     }
 }
 
@@ -354,13 +377,14 @@ fn extract_pixmaps_from_param(param: &rustbus::params::Param) -> Vec<IconPixmap>
 pub fn call_method(
     conn: &mut DuplexConn,
     bus_name: &str,
+    object_path: &str,
     method: &str,
     x: i32,
     y: i32,
 ) -> Result<()> {
     let mut call = rustbus::MessageBuilder::new()
         .call(method)
-        .on("/StatusNotifierItem")
+        .on(object_path)
         .with_interface(SNI_IFACE)
         .at(bus_name)
         .build();
@@ -479,5 +503,62 @@ mod tests {
         })));
         let tooltip = extract_tooltip_from_param(&variant);
         assert_eq!(tooltip, ToolTip::default());
+    }
+
+    #[test]
+    fn tooltip_default_values() {
+        let t = ToolTip::default();
+        assert_eq!(t.icon_name, "");
+        assert!(t.icon_pixmap.is_none());
+        assert_eq!(t.title, "");
+        assert_eq!(t.text, "");
+    }
+
+    #[test]
+    fn tooltip_parse_multiple_pixmaps_takes_first() {
+        let pixel_1x1: Param = Param::Container(Container::Struct(vec![
+            Param::Base(PBase::Int32(1)),
+            Param::Base(PBase::Int32(1)),
+            Param::Container(Container::Array(rustbus::params::Array {
+                element_sig: rustbus::signature::Type::Base(rustbus::signature::Base::Byte),
+                values: vec![
+                    Param::Base(PBase::Byte(0xAA)),
+                    Param::Base(PBase::Byte(0xBB)),
+                    Param::Base(PBase::Byte(0xCC)),
+                    Param::Base(PBase::Byte(0xDD)),
+                ],
+            })),
+        ]));
+        let pixel_2x1: Param = Param::Container(Container::Struct(vec![
+            Param::Base(PBase::Int32(2)),
+            Param::Base(PBase::Int32(1)),
+            Param::Container(Container::Array(rustbus::params::Array {
+                element_sig: rustbus::signature::Type::Base(rustbus::signature::Base::Byte),
+                values: vec![
+                    Param::Base(PBase::Byte(0x11)), Param::Base(PBase::Byte(0x22)),
+                    Param::Base(PBase::Byte(0x33)), Param::Base(PBase::Byte(0x44)),
+                    Param::Base(PBase::Byte(0x55)), Param::Base(PBase::Byte(0x66)),
+                    Param::Base(PBase::Byte(0x77)), Param::Base(PBase::Byte(0x88)),
+                ],
+            })),
+        ]));
+        let variant: Param = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+            value: Param::Container(Container::Struct(vec![
+                Param::Base(PBase::StringRef("")),
+                Param::Container(Container::Array(rustbus::params::Array {
+                    element_sig: sig_icon_array(),
+                    values: vec![pixel_1x1, pixel_2x1],
+                })),
+                Param::Base(PBase::StringRef("")),
+                Param::Base(PBase::StringRef("")),
+            ])),
+        })));
+
+        let tooltip = extract_tooltip_from_param(&variant);
+        let px = tooltip.icon_pixmap.unwrap();
+        // Should take the first pixmap (1x1), not the second (2x1)
+        assert_eq!(px.width, 1);
+        assert_eq!(px.height, 1);
     }
 }

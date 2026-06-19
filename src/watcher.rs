@@ -114,6 +114,13 @@ fn handle_watcher_call(
                     let id = item.id.clone();
                     items.insert(id.clone(), item);
                     events.push(TrayEvent::ItemAdded(id));
+
+                    // Emit StatusNotifierItemRegistered signal
+                    let mut sig = rustbus::MessageBuilder::new()
+                        .signal(WATCHER_INTERFACE, "StatusNotifierItemRegistered", WATCHER_PATH)
+                        .build();
+                    sig.body.push_param(&service_id as &str).unwrap();
+                    conn.send.send_message_write_all(&sig)?;
                 }
                 Err(e) => {
                     eprintln!("rustsni: failed to read item {bus_name}: {e}");
@@ -182,12 +189,42 @@ fn handle_properties_call(
             conn.send.send_message_write_all(&reply)?;
         }
         "GetAll" => {
-            // Return an error — clients should fall back to Get()
-            let err = msg.dynheader.make_error_response(
-                "org.freedesktop.DBus.Error.NotSupported".to_owned(),
-                Some("GetAll not supported, use Get".to_owned()),
+            let mut reply = msg.dynheader.make_response();
+            let names: Vec<&str> = items.keys().map(|id| id.0.as_str()).collect();
+            // Build a dict of all watcher properties: a{sv}
+            use rustbus::params::{Base as PBase, Container, DictMap, Dict, Param};
+            use rustbus::signature::{Base as SBase, Container as SContainer, Type};
+            let mut dict = DictMap::new();
+            dict.insert(
+                PBase::StringRef("RegisteredStatusNotifierItems"),
+                Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+                    sig: Type::Container(SContainer::Array(Box::new(Type::Base(SBase::String)))),
+                    value: Param::Container(Container::Array(rustbus::params::Array {
+                        element_sig: Type::Base(SBase::String),
+                        values: names.into_iter().map(|n| Param::Base(PBase::StringRef(n))).collect(),
+                    })),
+                }))),
             );
-            conn.send.send_message_write_all(&err)?;
+            dict.insert(
+                PBase::StringRef("IsStatusNotifierHostRegistered"),
+                Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+                    sig: Type::Base(SBase::Boolean),
+                    value: Param::Base(PBase::Boolean(true)),
+                }))),
+            );
+            dict.insert(
+                PBase::StringRef("ProtocolVersion"),
+                Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+                    sig: Type::Base(SBase::Int32),
+                    value: Param::Base(PBase::Int32(0)),
+                }))),
+            );
+            reply.body.push_old_param(&Param::Container(Container::Dict(Dict {
+                key_sig: SBase::String,
+                value_sig: Type::Container(SContainer::Variant),
+                map: dict,
+            }))).unwrap();
+            conn.send.send_message_write_all(&reply)?;
         }
         _ => {
             let err = standard_messages::unknown_method(&msg.dynheader);
@@ -222,8 +259,16 @@ pub fn handle_signal(
                 .map(|item| item.id.clone())
                 .collect();
             for id in ids_to_remove {
+                let service_id = id.0.clone();
                 items.remove(&id);
                 events.push(TrayEvent::ItemRemoved(id));
+
+                // Emit StatusNotifierItemUnregistered signal
+                let mut sig = rustbus::MessageBuilder::new()
+                    .signal(WATCHER_INTERFACE, "StatusNotifierItemUnregistered", WATCHER_PATH)
+                    .build();
+                sig.body.push_param(service_id.as_str()).unwrap();
+                conn.send.send_message_write_all(&sig)?;
             }
         }
     } else if iface == "org.kde.StatusNotifierItem" {
