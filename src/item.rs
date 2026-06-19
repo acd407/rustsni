@@ -105,6 +105,38 @@ impl TrayItem {
     }
 }
 
+impl TrayItem {
+    /// Whether this item has an associated menu.
+    pub fn has_menu(&self) -> bool {
+        !self.menu_path.is_empty() && self.menu_path != "/"
+    }
+
+    /// Select the largest icon pixmap by pixel count.
+    pub fn best_icon_pixmap(&self) -> Option<&IconPixmap> {
+        self.icon_pixmaps.iter().max_by_key(|p| p.width * p.height)
+    }
+
+    /// Select the largest overlay icon pixmap by pixel count.
+    pub fn best_overlay_icon_pixmap(&self) -> Option<&IconPixmap> {
+        self.overlay_icon_pixmaps.iter().max_by_key(|p| p.width * p.height)
+    }
+
+    /// Select the largest attention icon pixmap by pixel count.
+    pub fn best_attention_icon_pixmap(&self) -> Option<&IconPixmap> {
+        self.attention_icon_pixmaps.iter().max_by_key(|p| p.width * p.height)
+    }
+
+    /// Icon search paths for theme lookup: `[icon_theme_path, "/usr/share/pixmaps"]`.
+    pub fn icon_search_paths(&self) -> Vec<&str> {
+        let mut paths = Vec::new();
+        if !self.icon_theme_path.is_empty() {
+            paths.push(self.icon_theme_path.as_str());
+        }
+        paths.push("/usr/share/pixmaps");
+        paths
+    }
+}
+
 thread_local! {
     static PENDING_MESSAGES: std::cell::RefCell<std::collections::VecDeque<rustbus::message_builder::MarshalledMessage>> =
         std::cell::RefCell::new(std::collections::VecDeque::new());
@@ -507,5 +539,102 @@ mod tests {
         // Should take the first pixmap (1x1), not the second (2x1)
         assert_eq!(px.width, 1);
         assert_eq!(px.height, 1);
+    }
+
+    fn make_test_item() -> TrayItem {
+        TrayItem {
+            id: ItemId("test".to_owned()),
+            bus_name: ":1.1".to_owned(),
+            object_path: "/StatusNotifierItem".to_owned(),
+            category: String::new(),
+            item_id: String::new(),
+            title: String::new(),
+            status: String::new(),
+            window_id: 0,
+            icon_theme_path: "/usr/share/icons/hicolor".to_owned(),
+            icon_name: String::new(),
+            icon_pixmaps: vec![
+                IconPixmap { width: 16, height: 16, data: vec![0; 16*16*4] },
+                IconPixmap { width: 32, height: 32, data: vec![0; 32*32*4] },
+                IconPixmap { width: 24, height: 24, data: vec![0; 24*24*4] },
+            ],
+            attention_icon_name: String::new(),
+            attention_icon_pixmaps: vec![
+                IconPixmap { width: 16, height: 16, data: vec![0; 16*16*4] },
+            ],
+            attention_movie_name: String::new(),
+            overlay_icon_name: String::new(),
+            overlay_icon_pixmaps: vec![
+                IconPixmap { width: 8, height: 8, data: vec![0; 8*8*4] },
+                IconPixmap { width: 22, height: 22, data: vec![0; 22*22*4] },
+            ],
+            item_is_menu: false,
+            menu_path: "/MenuBar".to_owned(),
+            tooltip: ToolTip::default(),
+        }
+    }
+
+    #[test]
+    fn has_menu_with_path() {
+        let item = make_test_item();
+        assert!(item.has_menu());
+    }
+
+    #[test]
+    fn has_menu_empty_path() {
+        let mut item = make_test_item();
+        item.menu_path = String::new();
+        assert!(!item.has_menu());
+    }
+
+    #[test]
+    fn has_menu_slash_only() {
+        let mut item = make_test_item();
+        item.menu_path = "/".to_owned();
+        assert!(!item.has_menu());
+    }
+
+    #[test]
+    fn best_icon_pixmap_selects_largest() {
+        let item = make_test_item();
+        let best = item.best_icon_pixmap().unwrap();
+        assert_eq!(best.width, 32);
+        assert_eq!(best.height, 32);
+    }
+
+    #[test]
+    fn best_icon_pixmap_empty() {
+        let mut item = make_test_item();
+        item.icon_pixmaps.clear();
+        assert!(item.best_icon_pixmap().is_none());
+    }
+
+    #[test]
+    fn best_overlay_icon_pixmap_selects_largest() {
+        let item = make_test_item();
+        let best = item.best_overlay_icon_pixmap().unwrap();
+        assert_eq!(best.width, 22);
+    }
+
+    #[test]
+    fn best_attention_icon_pixmap_selects_largest() {
+        let item = make_test_item();
+        let best = item.best_attention_icon_pixmap().unwrap();
+        assert_eq!(best.width, 16);
+    }
+
+    #[test]
+    fn icon_search_paths_with_theme() {
+        let item = make_test_item();
+        let paths = item.icon_search_paths();
+        assert_eq!(paths, vec!["/usr/share/icons/hicolor", "/usr/share/pixmaps"]);
+    }
+
+    #[test]
+    fn icon_search_paths_without_theme() {
+        let mut item = make_test_item();
+        item.icon_theme_path = String::new();
+        let paths = item.icon_search_paths();
+        assert_eq!(paths, vec!["/usr/share/pixmaps"]);
     }
 }
