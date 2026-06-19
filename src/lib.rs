@@ -26,6 +26,8 @@ pub enum Error {
     Unmarshal(#[from] rustbus::wire::errors::UnmarshalError),
     #[error("another StatusNotifierWatcher is already running")]
     WatcherAlreadyRunning,
+    #[error("item not found: {0}")]
+    ItemNotFound(ItemId),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -105,25 +107,19 @@ impl TrayHost {
 
     /// Call the item's `Activate` method.
     pub fn activate(&mut self, id: &ItemId, x: i32, y: i32) -> Result<()> {
-        let item = self.items.get(id).ok_or_else(|| crate::Error::Unmarshal(
-            rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
-        ))?;
+        let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
         item::call_method(&mut self.conn, &item.bus_name, &item.object_path, "Activate", x, y)
     }
 
     /// Call the item's `ContextMenu` method.
     pub fn context_menu(&mut self, id: &ItemId, x: i32, y: i32) -> Result<()> {
-        let item = self.items.get(id).ok_or_else(|| crate::Error::Unmarshal(
-            rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
-        ))?;
+        let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
         item::call_method(&mut self.conn, &item.bus_name, &item.object_path, "ContextMenu", x, y)
     }
 
     /// Call the item's `SecondaryActivate` method.
     pub fn secondary_activate(&mut self, id: &ItemId, x: i32, y: i32) -> Result<()> {
-        let item = self.items.get(id).ok_or_else(|| crate::Error::Unmarshal(
-            rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
-        ))?;
+        let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
         item::call_method(&mut self.conn, &item.bus_name, &item.object_path, "SecondaryActivate", x, y)
     }
 
@@ -153,9 +149,7 @@ impl TrayHost {
 
     /// Call the item's `Scroll` method.
     pub fn scroll(&mut self, id: &ItemId, delta: i32, orientation: &str) -> Result<()> {
-        let item = self.items.get(id).ok_or_else(|| crate::Error::Unmarshal(
-            rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
-        ))?;
+        let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
         let mut call = rustbus::MessageBuilder::new()
             .call("Scroll")
             .on(&item.object_path)
@@ -170,9 +164,7 @@ impl TrayHost {
 
     /// Call the item's `ProvideXdgActivationToken` method.
     pub fn provide_xdg_activation_token(&mut self, id: &ItemId, token: &str) -> Result<()> {
-        let item = self.items.get(id).ok_or_else(|| crate::Error::Unmarshal(
-            rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
-        ))?;
+        let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
         let mut call = rustbus::MessageBuilder::new()
             .call("ProvideXdgActivationToken")
             .on(&item.object_path)
