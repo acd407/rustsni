@@ -346,9 +346,15 @@ fn parse_service(sender: &str, service: &str) -> (String, String) {
 }
 
 /// Normalize the service name passed to RegisterStatusNotifierItem.
+///
+/// Accepts:
+/// - Well-known names with suffix: `org.freedesktop.StatusNotifierItem-PID-ID`
+/// - KDE variant: `org.kde.StatusNotifierItem-PID-ID`
+/// - Unique bus names: `:1.42`
+/// - Bare PID-ID: `4077-1`
 fn normalize_item_name(name: &str) -> String {
-    if name.starts_with("org.freedesktop.StatusNotifierItem-")
-        || name.starts_with("org.kde.StatusNotifierItem-")
+    if name.starts_with("org.freedesktop.StatusNotifierItem")
+        || name.starts_with("org.kde.StatusNotifierItem")
         || name.starts_with(':')
     {
         return name.to_owned();
@@ -412,5 +418,21 @@ mod tests {
             service.to_owned()
         };
         assert_eq!(service_id, ":1.42/StatusNotifierItem");
+    }
+
+    #[test]
+    fn normalize_freedesktop_exact() {
+        assert_eq!(
+            normalize_item_name("org.freedesktop.StatusNotifierItem"),
+            "org.freedesktop.StatusNotifierItem"
+        );
+    }
+
+    #[test]
+    fn normalize_kde_exact() {
+        assert_eq!(
+            normalize_item_name("org.kde.StatusNotifierItem"),
+            "org.kde.StatusNotifierItem"
+        );
     }
 }

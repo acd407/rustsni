@@ -234,16 +234,6 @@ pub fn get_layout(
     Ok(children.iter().filter_map(parse_menu_node).collect())
 }
 
-/// Fire a menu click event via a fresh D-Bus connection.
-pub fn fire_click(bus_name: &str, menu_path: &str, menu_id: i32) -> Result<()> {
-    let mut conn = rustbus::connection::ll_conn::DuplexConn::connect_to_bus(
-        rustbus::get_session_bus_path()?,
-        false,
-    )?;
-    conn.send_hello(rustbus::connection::Timeout::Infinite)?;
-    event(&mut conn, bus_name, menu_path, menu_id, "clicked")
-}
-
 /// Fire an event on a menu item.
 pub fn event(
     conn: &mut DuplexConn,
@@ -330,7 +320,8 @@ fn parse_menu_node(param: &Param) -> Option<MenuNode> {
     })
 }
 
-fn get_str_prop(props: &rustbus::params::DictMap, key: &str) -> String {
+/// Look up a key in a DictMap and return the unwrapped variant inner value.
+fn get_variant<'a>(props: &'a rustbus::params::DictMap, key: &str) -> Option<&'a Param<'a, 'a>> {
     for (k, v) in props {
         let k_str = match k {
             Base::StringRef(s) => *s,
@@ -341,73 +332,43 @@ fn get_str_prop(props: &rustbus::params::DictMap, key: &str) -> String {
             continue;
         }
         if let Param::Container(Container::Variant(var)) = v {
-            match &var.value {
-                Param::Base(Base::StringRef(s)) => return s.to_string(),
-                Param::Base(Base::String(s)) => return s.clone(),
-                _ => {}
-            }
+            return Some(&var.value);
         }
     }
-    String::new()
+    None
+}
+
+fn get_str_prop(props: &rustbus::params::DictMap, key: &str) -> String {
+    match get_variant(props, key) {
+        Some(Param::Base(Base::StringRef(s))) => s.to_string(),
+        Some(Param::Base(Base::String(s))) => s.clone(),
+        _ => String::new(),
+    }
 }
 
 fn get_bool_prop(props: &rustbus::params::DictMap, key: &str) -> Option<bool> {
-    for (k, v) in props {
-        let k_str = match k {
-            Base::StringRef(s) => *s,
-            Base::String(s) => s.as_str(),
-            _ => continue,
-        };
-        if k_str != key {
-            continue;
-        }
-        if let Param::Container(Container::Variant(var)) = v {
-            if let Param::Base(Base::Boolean(b)) = &var.value {
-                return Some(*b);
-            }
-        }
+    match get_variant(props, key) {
+        Some(Param::Base(Base::Boolean(b))) => Some(*b),
+        _ => None,
     }
-    None
 }
 
 fn get_int_prop(props: &rustbus::params::DictMap, key: &str) -> Option<i32> {
-    for (k, v) in props {
-        let k_str = match k {
-            Base::StringRef(s) => *s,
-            Base::String(s) => s.as_str(),
-            _ => continue,
-        };
-        if k_str != key {
-            continue;
-        }
-        if let Param::Container(Container::Variant(var)) = v {
-            if let Param::Base(Base::Int32(n)) = &var.value {
-                return Some(*n);
-            }
-        }
+    match get_variant(props, key) {
+        Some(Param::Base(Base::Int32(n))) => Some(*n),
+        _ => None,
     }
-    None
 }
 
 fn get_bytes_prop(props: &rustbus::params::DictMap, key: &str) -> Vec<u8> {
-    for (k, v) in props {
-        let k_str = match k {
-            Base::StringRef(s) => *s,
-            Base::String(s) => s.as_str(),
-            _ => continue,
-        };
-        if k_str != key {
-            continue;
+    match get_variant(props, key) {
+        Some(Param::Container(Container::Array(arr))) => {
+            arr.values.iter().filter_map(|b| {
+                if let Param::Base(Base::Byte(v)) = b { Some(*v) } else { None }
+            }).collect()
         }
-        if let Param::Container(Container::Variant(var)) = v {
-            if let Param::Container(Container::Array(arr)) = &var.value {
-                return arr.values.iter().filter_map(|b| {
-                    if let Param::Base(Base::Byte(v)) = b { Some(*v) } else { None }
-                }).collect();
-            }
-        }
+        _ => Vec::new(),
     }
-    Vec::new()
 }
 
 /// Convert a borrowed DictMap into owned (String, PropValue) pairs.
