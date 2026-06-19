@@ -10,6 +10,15 @@ use crate::Result;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ItemId(pub String);
 
+/// Tooltip data: icon name, optional icon pixmap, title, and descriptive text.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolTip {
+    pub icon_name: String,
+    pub icon_pixmap: Option<IconPixmap>,
+    pub title: String,
+    pub text: String,
+}
+
 /// Resolved properties of a StatusNotifierItem.
 #[derive(Debug, Clone)]
 pub struct TrayItem {
@@ -27,6 +36,7 @@ pub struct TrayItem {
     pub overlay_icon_pixmaps: Vec<IconPixmap>,
     pub item_is_menu: bool,
     pub menu_path: String,
+    pub tooltip: ToolTip,
 }
 
 const SNI_IFACE: &str = "org.kde.StatusNotifierItem";
@@ -54,6 +64,7 @@ impl TrayItem {
             overlay_icon_pixmaps: Vec::new(),
             item_is_menu: false,
             menu_path: String::new(),
+            tooltip: ToolTip::default(),
         };
 
         item.category = get_string(conn, bus_name, object_path, "Category").unwrap_or_default();
@@ -69,6 +80,7 @@ impl TrayItem {
         item.icon_pixmaps = get_pixmaps(conn, bus_name, object_path, "IconPixmap");
         item.attention_icon_pixmaps = get_pixmaps(conn, bus_name, object_path, "AttentionIconPixmap");
         item.overlay_icon_pixmaps = get_pixmaps(conn, bus_name, object_path, "OverlayIconPixmap");
+        item.tooltip = get_tooltip(conn, bus_name, object_path);
 
         Ok(item)
     }
@@ -167,6 +179,106 @@ fn get_pixmaps(conn: &mut DuplexConn, bus_name: &str, object_path: &str, prop: &
     extract_pixmaps_from_param(&param)
 }
 
+fn get_tooltip(conn: &mut DuplexConn, bus_name: &str, object_path: &str) -> ToolTip {
+    let resp = match call_get_property(conn, bus_name, object_path, "ToolTip") {
+        Ok(r) => r,
+        Err(_) => return ToolTip::default(),
+    };
+    let mut parser = resp.body.parser();
+    let param = match parser.get_param() {
+        Ok(p) => p,
+        Err(_) => return ToolTip::default(),
+    };
+    extract_tooltip_from_param(&param)
+}
+
+/// Parse a variant containing (sa(iiay)ss) into a ToolTip.
+fn extract_tooltip_from_param(param: &rustbus::params::Param) -> ToolTip {
+    use rustbus::params::{Container, Param};
+
+    let inner = match param {
+        Param::Container(Container::Variant(v)) => &v.value,
+        _ => return ToolTip::default(),
+    };
+
+    let fields = match inner {
+        Param::Container(Container::Struct(s)) => s,
+        _ => return ToolTip::default(),
+    };
+    if fields.len() < 4 {
+        return ToolTip::default();
+    }
+
+    let icon_name = match &fields[0] {
+        Param::Base(rustbus::params::Base::StringRef(s)) => s.to_string(),
+        Param::Base(rustbus::params::Base::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+
+    // icon pixmap: a(iiay) — take the first image if present
+    let icon_pixmap = match &fields[1] {
+        Param::Container(Container::Array(arr)) => {
+            arr.values.first().and_then(|elem| {
+                let s = match elem {
+                    Param::Container(Container::Struct(s)) => s,
+                    _ => return None,
+                };
+                if s.len() < 3 {
+                    return None;
+                }
+                let w = match &s[0] {
+                    Param::Base(rustbus::params::Base::Int32(v)) => *v,
+                    _ => return None,
+                };
+                let h = match &s[1] {
+                    Param::Base(rustbus::params::Base::Int32(v)) => *v,
+                    _ => return None,
+                };
+                let raw: Vec<u8> = match &s[2] {
+                    Param::Container(Container::Array(a)) => a.values.iter().filter_map(|b| {
+                        if let Param::Base(rustbus::params::Base::Byte(v)) = b { Some(*v) } else { None }
+                    }).collect(),
+                    _ => return None,
+                };
+                if w <= 0 || h <= 0 {
+                    return None;
+                }
+                let expected = (w as usize) * (h as usize) * 4;
+                if raw.len() < expected {
+                    return None;
+                }
+                let mut data = raw[..expected].to_vec();
+                for pixel in data.chunks_exact_mut(4) {
+                    let a = pixel[0];
+                    let r = pixel[1];
+                    let g = pixel[2];
+                    let b = pixel[3];
+                    pixel[0] = b;
+                    pixel[1] = g;
+                    pixel[2] = r;
+                    pixel[3] = a;
+                }
+                Some(IconPixmap { width: w as u32, height: h as u32, data })
+            })
+        }
+        _ => None,
+    };
+
+    let title = match &fields[2] {
+        Param::Base(rustbus::params::Base::StringRef(s)) => s.to_string(),
+        Param::Base(rustbus::params::Base::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+
+    let text = match &fields[3] {
+        Param::Base(rustbus::params::Base::StringRef(s)) => s.to_string(),
+        Param::Base(rustbus::params::Base::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+
+    ToolTip { icon_name, icon_pixmap, title, text }
+}
+
 /// Extract IconPixmaps from a Param value (variant containing a(iiay)).
 fn extract_pixmaps_from_param(param: &rustbus::params::Param) -> Vec<IconPixmap> {
     use rustbus::params::{Container, Param};
@@ -256,4 +368,116 @@ pub fn call_method(
     call.body.push_param(y).unwrap();
     conn.send.send_message_write_all(&call)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustbus::params::{Base as PBase, Container, Param};
+
+    /// Helper: create a signature::Type for a(iiay) — array of (i32,i32,ay).
+    fn sig_icon_array() -> rustbus::signature::Type {
+        use rustbus::signature::{Base as SBase, Container as SContainer, StructTypes, Type};
+        Type::Container(SContainer::Array(Box::new(Type::Container(SContainer::Struct(
+            StructTypes::new(vec![
+                Type::Base(SBase::Int32),
+                Type::Base(SBase::Int32),
+                Type::Container(SContainer::Array(Box::new(Type::Base(SBase::Byte)))),
+            ]).unwrap(),
+        )))))
+    }
+
+    /// Build a Param tree for `(sa(iiay)ss)` and parse it as a ToolTip.
+    #[test]
+    fn tooltip_parse_full() {
+        // (sa(iiay)ss) — struct with 4 fields
+        let icon_name: Param = Param::Base(PBase::StringRef("my-icon"));
+        let pixel_data: Param = Param::Container(Container::Array(rustbus::params::Array {
+            element_sig: rustbus::signature::Type::Base(rustbus::signature::Base::Byte),
+            values: vec![
+                Param::Base(PBase::Byte(0xFF)), // A
+                Param::Base(PBase::Byte(0x11)), // R
+                Param::Base(PBase::Byte(0x22)), // G
+                Param::Base(PBase::Byte(0x33)), // B
+            ],
+        }));
+        let pixmap_struct: Param = Param::Container(Container::Struct(vec![
+            Param::Base(PBase::Int32(1)),
+            Param::Base(PBase::Int32(1)),
+            pixel_data,
+        ]));
+        let pixmaps: Param = Param::Container(Container::Array(rustbus::params::Array {
+            element_sig: sig_icon_array(),
+            values: vec![pixmap_struct],
+        }));
+        let title: Param = Param::Base(PBase::StringRef("Title Text"));
+        let text: Param = Param::Base(PBase::StringRef("Description"));
+
+        let tooltip_struct: Param = Param::Container(Container::Struct(vec![
+            icon_name,
+            pixmaps,
+            title,
+            text,
+        ]));
+
+        // Wrap in variant (as Properties.Get returns)
+        let variant: Param = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+            value: tooltip_struct,
+        })));
+
+        let tooltip = extract_tooltip_from_param(&variant);
+        assert_eq!(tooltip.icon_name, "my-icon");
+        assert_eq!(tooltip.title, "Title Text");
+        assert_eq!(tooltip.text, "Description");
+        let px = tooltip.icon_pixmap.unwrap();
+        assert_eq!(px.width, 1);
+        assert_eq!(px.height, 1);
+        // big-endian [A,R,G,B] → LE [B,G,R,A]
+        assert_eq!(&px.data, &[0x33, 0x22, 0x11, 0xFF]);
+    }
+
+    #[test]
+    fn tooltip_parse_empty_icon_array() {
+        let icon_name: Param = Param::Base(PBase::StringRef(""));
+        let pixmaps: Param = Param::Container(Container::Array(rustbus::params::Array {
+            element_sig: rustbus::signature::Type::Base(rustbus::signature::Base::Byte),
+            values: vec![],
+        }));
+        let title: Param = Param::Base(PBase::StringRef("T"));
+        let text: Param = Param::Base(PBase::StringRef(""));
+
+        let variant: Param = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+            value: Param::Container(Container::Struct(vec![
+                icon_name, pixmaps, title, text,
+            ])),
+        })));
+
+        let tooltip = extract_tooltip_from_param(&variant);
+        assert_eq!(tooltip.icon_name, "");
+        assert!(tooltip.icon_pixmap.is_none());
+        assert_eq!(tooltip.title, "T");
+    }
+
+    #[test]
+    fn tooltip_parse_wrong_type_returns_default() {
+        let variant: Param = Param::Base(PBase::Int32(42));
+        let tooltip = extract_tooltip_from_param(&variant);
+        assert_eq!(tooltip, ToolTip::default());
+    }
+
+    #[test]
+    fn tooltip_parse_short_struct_returns_default() {
+        // Only 2 fields, need 4
+        let variant: Param = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+            value: Param::Container(Container::Struct(vec![
+                Param::Base(PBase::StringRef("a")),
+                Param::Base(PBase::StringRef("b")),
+            ])),
+        })));
+        let tooltip = extract_tooltip_from_param(&variant);
+        assert_eq!(tooltip, ToolTip::default());
+    }
 }

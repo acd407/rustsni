@@ -3,12 +3,48 @@
 //! Icons are transferred as `a(iiay)` — an array of `(width, height, ARGB32_be)`.
 
 /// A decoded icon pixmap in native-endian ARGB32 (Cairo format on LE: `[B,G,R,A]`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IconPixmap {
     pub width: u32,
     pub height: u32,
     /// Pixel data in native-endian ARGB32 (ready for Cairo ImageSurface).
     pub data: Vec<u8>,
+}
+
+/// Convert simple `(width, height, &[u8])` tuples into `IconPixmap`s.
+///
+/// This is the public API for callers who already have raw ARGB32 big-endian
+/// pixel data (e.g. from a decoded image file) and don't want to build
+/// `rustbus::params::Param` trees manually.
+pub fn from_tuples(tuples: &[(i32, i32, &[u8])]) -> Vec<IconPixmap> {
+    let mut result = Vec::new();
+    for &(w, h, raw) in tuples {
+        if w <= 0 || h <= 0 {
+            continue;
+        }
+        let expected = (w as usize) * (h as usize) * 4;
+        if raw.len() < expected {
+            continue;
+        }
+        let mut data = raw[..expected].to_vec();
+        // big-endian [A,R,G,B] → native LE Cairo [B,G,R,A]
+        for pixel in data.chunks_exact_mut(4) {
+            let a = pixel[0];
+            let r = pixel[1];
+            let g = pixel[2];
+            let b = pixel[3];
+            pixel[0] = b;
+            pixel[1] = g;
+            pixel[2] = r;
+            pixel[3] = a;
+        }
+        result.push(IconPixmap {
+            width: w as u32,
+            height: h as u32,
+            data,
+        });
+    }
+    result
 }
 
 #[cfg(test)]

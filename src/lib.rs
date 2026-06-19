@@ -12,8 +12,8 @@ use std::os::fd::{AsRawFd, RawFd};
 use rustbus::connection::ll_conn::DuplexConn;
 use rustbus::connection::Timeout;
 
-pub use icon::IconPixmap;
-pub use item::{ItemId, TrayItem};
+pub use icon::{from_tuples, IconPixmap};
+pub use item::{ItemId, ToolTip, TrayItem};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
