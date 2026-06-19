@@ -234,6 +234,19 @@ pub fn get_layout(
     Ok(children.iter().filter_map(parse_menu_node).collect())
 }
 
+/// Fire a menu click event via a fresh D-Bus connection.
+///
+/// Useful when you only have `bus_name`/`menu_path` and no `TrayHost`
+/// (e.g. from a background thread).
+pub fn fire_click(bus_name: &str, menu_path: &str, menu_id: i32) -> Result<()> {
+    let mut conn = rustbus::connection::ll_conn::DuplexConn::connect_to_bus(
+        rustbus::get_session_bus_path()?,
+        false,
+    )?;
+    conn.send_hello(rustbus::connection::Timeout::Infinite)?;
+    event(&mut conn, bus_name, menu_path, menu_id, "clicked")
+}
+
 /// Fire an event on a menu item.
 pub fn event(
     conn: &mut DuplexConn,
