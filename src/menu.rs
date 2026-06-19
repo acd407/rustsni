@@ -39,6 +39,7 @@ pub struct MenuNode {
 
 /// Call `com.canonical.dbusmenu.AboutToShow` on a menu item.
 /// Returns `true` if the server says the menu needs updating.
+#[allow(dead_code)]
 pub fn about_to_show(
     conn: &mut DuplexConn,
     bus_name: &str,

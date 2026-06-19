@@ -3,7 +3,7 @@
 mod host;
 mod icon;
 mod item;
-pub mod menu;
+mod menu;
 mod watcher;
 
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ use rustbus::connection::Timeout;
 
 pub use icon::{from_tuples, IconPixmap};
 pub use item::{ItemId, ToolTip, TrayItem};
-pub use menu::{MenuItemProps, MenuNode, PropValue};
+pub use menu::{MenuItemProps, MenuNode, PropValue, fire_click as fire_menu_click};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
