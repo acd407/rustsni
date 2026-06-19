@@ -34,6 +34,7 @@ pub enum TrayEvent {
     ItemAdded(ItemId),
     ItemChanged(ItemId),
     ItemRemoved(ItemId),
+    MenuChanged(ItemId),
 }
 
 pub struct TrayHost {

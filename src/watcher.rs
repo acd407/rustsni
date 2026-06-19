@@ -42,6 +42,12 @@ pub fn register(conn: &mut DuplexConn) -> Result<()> {
     );
     conn.send.send_message_write_all(&add_match)?;
 
+    // Subscribe to dbusmenu signals (LayoutUpdated, ItemsPropertiesUpdated)
+    let add_match = standard_messages::add_match(
+        "type='signal',interface='com.canonical.dbusmenu'",
+    );
+    conn.send.send_message_write_all(&add_match)?;
+
     // Emit StatusNotifierHostRegistered to notify existing items
     eprintln!("rustsni: emitting StatusNotifierHostRegistered signal");
     let sig = rustbus::MessageBuilder::new()
@@ -283,6 +289,21 @@ pub fn handle_signal(
                 Err(e) => {
                     eprintln!("rustsni: failed to re-read item {sender}: {e}");
                 }
+            }
+        }
+    } else if iface == "com.canonical.dbusmenu"
+        && (member == "LayoutUpdated" || member == "ItemsPropertiesUpdated")
+    {
+        // Match signal sender to an item's bus_name to emit MenuChanged
+        let sender = msg.dynheader.sender.as_deref().unwrap_or("");
+        if !sender.is_empty() {
+            let ids: Vec<ItemId> = items
+                .values()
+                .filter(|item| item.bus_name == sender)
+                .map(|item| item.id.clone())
+                .collect();
+            for id in ids {
+                events.push(TrayEvent::MenuChanged(id));
             }
         }
     }

@@ -13,8 +13,47 @@ pub struct MenuNode {
     pub label: String,
     pub enabled: bool,
     pub visible: bool,
+    pub icon_name: String,
+    pub icon_data: Vec<u8>,
+    pub toggle_type: String,
+    pub toggle_state: i32,
     pub is_submenu: bool,
     pub children: Vec<MenuNode>,
+}
+
+/// Call `com.canonical.dbusmenu.AboutToShow` on a menu item.
+/// Returns `true` if the server says the menu needs updating.
+pub fn about_to_show(
+    conn: &mut DuplexConn,
+    bus_name: &str,
+    menu_path: &str,
+    id: i32,
+) -> Result<bool> {
+    let mut call = rustbus::MessageBuilder::new()
+        .call("AboutToShow")
+        .on(menu_path)
+        .with_interface("com.canonical.dbusmenu")
+        .at(bus_name)
+        .build();
+    call.body.push_param(id).unwrap();
+
+    let serial = conn.send.send_message_write_all(&call)?;
+    let resp = loop {
+        let resp = conn.recv.get_next_message(Timeout::Infinite)?;
+        if resp.typ == rustbus::message_builder::MessageType::Reply {
+            break resp;
+        }
+        if resp.typ == rustbus::message_builder::MessageType::Error {
+            return Ok(false);
+        }
+    };
+    if resp.dynheader.response_serial != Some(serial) {
+        return Ok(false);
+    }
+
+    let mut parser = resp.body.parser();
+    let need_update: bool = parser.get().unwrap_or(false);
+    Ok(need_update)
 }
 
 /// Call `GetLayout(parent_id, 1, &[])` and parse the children.
@@ -139,6 +178,10 @@ fn parse_menu_node(param: &Param) -> Option<MenuNode> {
     let label = get_str_prop(props, "label");
     let enabled = get_bool_prop(props, "enabled").unwrap_or(true);
     let visible = get_bool_prop(props, "visible").unwrap_or(true);
+    let icon_name = get_str_prop(props, "icon-name");
+    let icon_data = get_bytes_prop(props, "icon-data");
+    let toggle_type = get_str_prop(props, "toggle-type");
+    let toggle_state = get_int_prop(props, "toggle-state").unwrap_or(-1);
     let is_submenu = props.iter().any(|(k, _)| {
         match k {
             Base::StringRef(s) => *s == "children-display",
@@ -158,6 +201,10 @@ fn parse_menu_node(param: &Param) -> Option<MenuNode> {
         label,
         enabled,
         visible,
+        icon_name,
+        icon_data,
+        toggle_type,
+        toggle_state,
         is_submenu: is_submenu || !children.is_empty(),
         children,
     })
@@ -201,4 +248,160 @@ fn get_bool_prop(props: &rustbus::params::DictMap, key: &str) -> Option<bool> {
         }
     }
     None
+}
+
+fn get_int_prop(props: &rustbus::params::DictMap, key: &str) -> Option<i32> {
+    for (k, v) in props {
+        let k_str = match k {
+            Base::StringRef(s) => *s,
+            Base::String(s) => s.as_str(),
+            _ => continue,
+        };
+        if k_str != key {
+            continue;
+        }
+        if let Param::Container(Container::Variant(var)) = v {
+            if let Param::Base(Base::Int32(n)) = &var.value {
+                return Some(*n);
+            }
+        }
+    }
+    None
+}
+
+fn get_bytes_prop(props: &rustbus::params::DictMap, key: &str) -> Vec<u8> {
+    for (k, v) in props {
+        let k_str = match k {
+            Base::StringRef(s) => *s,
+            Base::String(s) => s.as_str(),
+            _ => continue,
+        };
+        if k_str != key {
+            continue;
+        }
+        if let Param::Container(Container::Variant(var)) = v {
+            if let Param::Container(Container::Array(arr)) = &var.value {
+                return arr.values.iter().filter_map(|b| {
+                    if let Param::Base(Base::Byte(v)) = b { Some(*v) } else { None }
+                }).collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_variant_str(s: &str) -> Param<'static, 'static> {
+        Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+            value: Param::Base(Base::String(s.to_owned())),
+        })))
+    }
+
+    fn make_variant_bool(b: bool) -> Param<'static, 'static> {
+        Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+            sig: rustbus::signature::Type::Base(rustbus::signature::Base::Boolean),
+            value: Param::Base(Base::Boolean(b)),
+        })))
+    }
+
+    fn make_variant_i32(n: i32) -> Param<'static, 'static> {
+        Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+            sig: rustbus::signature::Type::Base(rustbus::signature::Base::Int32),
+            value: Param::Base(Base::Int32(n)),
+        })))
+    }
+
+    #[test]
+    fn str_prop_found() {
+        let mut props = rustbus::params::DictMap::new();
+        props.insert(Base::String("label".to_owned()), make_variant_str("Hello"));
+        assert_eq!(get_str_prop(&props, "label"), "Hello");
+    }
+
+    #[test]
+    fn str_prop_missing() {
+        let props = rustbus::params::DictMap::new();
+        assert_eq!(get_str_prop(&props, "label"), "");
+    }
+
+    #[test]
+    fn bool_prop_found() {
+        let mut props = rustbus::params::DictMap::new();
+        props.insert(Base::String("enabled".to_owned()), make_variant_bool(false));
+        assert_eq!(get_bool_prop(&props, "enabled"), Some(false));
+    }
+
+    #[test]
+    fn bool_prop_missing() {
+        let props = rustbus::params::DictMap::new();
+        assert_eq!(get_bool_prop(&props, "enabled"), None);
+    }
+
+    #[test]
+    fn int_prop_found() {
+        let mut props = rustbus::params::DictMap::new();
+        props.insert(Base::String("toggle-state".to_owned()), make_variant_i32(1));
+        assert_eq!(get_int_prop(&props, "toggle-state"), Some(1));
+    }
+
+    #[test]
+    fn int_prop_missing() {
+        let props = rustbus::params::DictMap::new();
+        assert_eq!(get_int_prop(&props, "toggle-state"), None);
+    }
+
+    #[test]
+    fn bytes_prop_empty() {
+        let props = rustbus::params::DictMap::new();
+        assert!(get_bytes_prop(&props, "icon-data").is_empty());
+    }
+
+    #[test]
+    fn parse_menu_node_full() {
+        let mut props = rustbus::params::DictMap::new();
+        props.insert(Base::String("label".to_owned()), make_variant_str("Test"));
+        props.insert(Base::String("enabled".to_owned()), make_variant_bool(true));
+        props.insert(Base::String("visible".to_owned()), make_variant_bool(true));
+        props.insert(Base::String("icon-name".to_owned()), make_variant_str("icon"));
+        props.insert(Base::String("toggle-type".to_owned()), make_variant_str("checkmark"));
+        props.insert(Base::String("toggle-state".to_owned()), make_variant_i32(1));
+        let children_arr = Param::Container(Container::Array(rustbus::params::Array {
+            element_sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+            values: vec![],
+        }));
+        let struct_inner = Param::Container(Container::Struct(vec![
+            Param::Base(Base::Int32(42)),
+            Param::Container(Container::Dict(rustbus::params::Dict {
+                key_sig: rustbus::signature::Base::String,
+                value_sig: rustbus::signature::Type::Container(rustbus::signature::Container::Variant),
+                map: props,
+            })),
+            children_arr,
+        ]));
+        // parse_menu_node expects a Variant wrapping the struct (as in av arrays)
+        let node = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+            value: struct_inner,
+        })));
+
+        let parsed = parse_menu_node(&node).unwrap();
+        assert_eq!(parsed.id, 42);
+        assert_eq!(parsed.label, "Test");
+        assert!(parsed.enabled);
+        assert!(parsed.visible);
+        assert_eq!(parsed.icon_name, "icon");
+        assert_eq!(parsed.toggle_type, "checkmark");
+        assert_eq!(parsed.toggle_state, 1);
+        assert!(!parsed.is_submenu);
+    }
+
+    #[test]
+    fn parse_menu_node_wrong_type() {
+        let node = Param::Base(Base::Int32(0));
+        assert!(parse_menu_node(&node).is_none());
+    }
 }
