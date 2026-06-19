@@ -106,13 +106,13 @@ impl TrayItem {
 }
 
 thread_local! {
-    static PENDING_MESSAGES: std::cell::RefCell<Vec<rustbus::message_builder::MarshalledMessage>> =
-        std::cell::RefCell::new(Vec::new());
+    static PENDING_MESSAGES: std::cell::RefCell<std::collections::VecDeque<rustbus::message_builder::MarshalledMessage>> =
+        std::cell::RefCell::new(std::collections::VecDeque::new());
 }
 
 /// Get a pending message that was received while waiting for a property response.
 pub fn take_pending_message() -> Option<rustbus::message_builder::MarshalledMessage> {
-    PENDING_MESSAGES.with(|msgs| msgs.borrow_mut().pop())
+    PENDING_MESSAGES.with(|msgs| msgs.borrow_mut().pop_front())
 }
 
 /// Call `Properties.Get(interface, property)`, skip signals, return reply.
@@ -151,11 +151,11 @@ fn call_get_property(
                     ));
                 }
                 // Error for a different message - buffer it
-                PENDING_MESSAGES.with(|msgs| msgs.borrow_mut().push(resp));
+                PENDING_MESSAGES.with(|msgs| msgs.borrow_mut().push_back(resp));
             }
             _ => {
                 // Signal or Call for a different message - buffer it
-                PENDING_MESSAGES.with(|msgs| msgs.borrow_mut().push(resp));
+                PENDING_MESSAGES.with(|msgs| msgs.borrow_mut().push_back(resp));
             }
         }
     }
