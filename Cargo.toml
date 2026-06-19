@@ -1,0 +1,9 @@
+[package]
+name = "rustsni"
+version = "0.1.0"
+edition = "2024"
+description = "A poll-friendly StatusNotifierItem host library built on rustbus"
+
+[dependencies]
+rustbus = { path = "../rustbus/rustbus" }
+thiserror = "2"
