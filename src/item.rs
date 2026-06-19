@@ -248,46 +248,11 @@ fn extract_tooltip_from_param(param: &rustbus::params::Param) -> ToolTip {
     let icon_pixmap = match &fields[1] {
         Param::Container(Container::Array(arr)) => {
             arr.values.first().and_then(|elem| {
-                let s = match elem {
-                    Param::Container(Container::Struct(s)) => s,
-                    _ => return None,
-                };
-                if s.len() < 3 {
-                    return None;
+                if let Param::Container(Container::Struct(s)) = elem {
+                    parse_pixmap_struct(s)
+                } else {
+                    None
                 }
-                let w = match &s[0] {
-                    Param::Base(rustbus::params::Base::Int32(v)) => *v,
-                    _ => return None,
-                };
-                let h = match &s[1] {
-                    Param::Base(rustbus::params::Base::Int32(v)) => *v,
-                    _ => return None,
-                };
-                let raw: Vec<u8> = match &s[2] {
-                    Param::Container(Container::Array(a)) => a.values.iter().filter_map(|b| {
-                        if let Param::Base(rustbus::params::Base::Byte(v)) = b { Some(*v) } else { None }
-                    }).collect(),
-                    _ => return None,
-                };
-                if w <= 0 || h <= 0 {
-                    return None;
-                }
-                let expected = (w as usize) * (h as usize) * 4;
-                if raw.len() < expected {
-                    return None;
-                }
-                let mut data = raw[..expected].to_vec();
-                for pixel in data.chunks_exact_mut(4) {
-                    let a = pixel[0];
-                    let r = pixel[1];
-                    let g = pixel[2];
-                    let b = pixel[3];
-                    pixel[0] = b;
-                    pixel[1] = g;
-                    pixel[2] = r;
-                    pixel[3] = a;
-                }
-                Some(IconPixmap { width: w as u32, height: h as u32, data })
             })
         }
         _ => None,
@@ -312,7 +277,6 @@ fn extract_tooltip_from_param(param: &rustbus::params::Param) -> ToolTip {
 fn extract_pixmaps_from_param(param: &rustbus::params::Param) -> Vec<IconPixmap> {
     use rustbus::params::{Container, Param};
 
-    // The param is Variant(Array(Struct(i32, i32, Array(u8))))
     let inner = match param {
         Param::Container(Container::Variant(v)) => &v.value,
         _ => return Vec::new(),
@@ -323,60 +287,37 @@ fn extract_pixmaps_from_param(param: &rustbus::params::Param) -> Vec<IconPixmap>
         _ => return Vec::new(),
     };
 
-    let mut result = Vec::new();
-    for elem in array {
-        let fields = match elem {
-            Param::Container(Container::Struct(s)) => s,
-            _ => continue,
-        };
-        if fields.len() < 3 {
-            continue;
+    array.iter().filter_map(|elem| {
+        if let Param::Container(Container::Struct(s)) = elem {
+            parse_pixmap_struct(s)
+        } else {
+            None
         }
-        let w = match &fields[0] {
-            Param::Base(rustbus::params::Base::Int32(v)) => *v,
-            _ => continue,
-        };
-        let h = match &fields[1] {
-            Param::Base(rustbus::params::Base::Int32(v)) => *v,
-            _ => continue,
-        };
-        let raw = match &fields[2] {
-            Param::Container(Container::Array(arr)) => {
-                arr.values.iter().filter_map(|b| {
-                    if let Param::Base(rustbus::params::Base::Byte(v)) = b { Some(*v) } else { None }
-                }).collect::<Vec<u8>>()
-            }
-            _ => continue,
-        };
+    }).collect()
+}
 
-        if w <= 0 || h <= 0 {
-            continue;
-        }
-        let expected = (w as usize) * (h as usize) * 4;
-        if raw.len() < expected {
-            continue;
-        }
+/// Parse a single `(i32, i32, ay)` struct into an IconPixmap.
+fn parse_pixmap_struct(fields: &[rustbus::params::Param]) -> Option<IconPixmap> {
+    use rustbus::params::{Container, Param};
 
-        let mut data = raw[..expected].to_vec();
-        // big-endian [A,R,G,B] → native LE Cairo [B,G,R,A]
-        for pixel in data.chunks_exact_mut(4) {
-            let a = pixel[0];
-            let r = pixel[1];
-            let g = pixel[2];
-            let b = pixel[3];
-            pixel[0] = b;
-            pixel[1] = g;
-            pixel[2] = r;
-            pixel[3] = a;
-        }
-
-        result.push(IconPixmap {
-            width: w as u32,
-            height: h as u32,
-            data,
-        });
+    if fields.len() < 3 {
+        return None;
     }
-    result
+    let w = match &fields[0] {
+        Param::Base(rustbus::params::Base::Int32(v)) => *v,
+        _ => return None,
+    };
+    let h = match &fields[1] {
+        Param::Base(rustbus::params::Base::Int32(v)) => *v,
+        _ => return None,
+    };
+    let raw: Vec<u8> = match &fields[2] {
+        Param::Container(Container::Array(a)) => a.values.iter().filter_map(|b| {
+            if let Param::Base(rustbus::params::Base::Byte(v)) = b { Some(*v) } else { None }
+        }).collect(),
+        _ => return None,
+    };
+    IconPixmap::from_argb32be(w, h, &raw)
 }
 
 /// Call a simple (x, y) method on a StatusNotifierItem.

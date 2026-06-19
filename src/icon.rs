@@ -11,20 +11,16 @@ pub struct IconPixmap {
     pub data: Vec<u8>,
 }
 
-/// Convert simple `(width, height, &[u8])` tuples into `IconPixmap`s.
-///
-/// This is the public API for callers who already have raw ARGB32 big-endian
-/// pixel data (e.g. from a decoded image file) and don't want to build
-/// `rustbus::params::Param` trees manually.
-pub fn from_tuples(tuples: &[(i32, i32, &[u8])]) -> Vec<IconPixmap> {
-    let mut result = Vec::new();
-    for &(w, h, raw) in tuples {
-        if w <= 0 || h <= 0 {
-            continue;
+impl IconPixmap {
+    /// Build from big-endian ARGB32 raw bytes `[A,R,G,B,A,R,G,B,...]`.
+    /// Returns `None` if dimensions are invalid or data is too short.
+    pub fn from_argb32be(width: i32, height: i32, raw: &[u8]) -> Option<Self> {
+        if width <= 0 || height <= 0 {
+            return None;
         }
-        let expected = (w as usize) * (h as usize) * 4;
+        let expected = (width as usize) * (height as usize) * 4;
         if raw.len() < expected {
-            continue;
+            return None;
         }
         let mut data = raw[..expected].to_vec();
         // big-endian [A,R,G,B] → native LE Cairo [B,G,R,A]
@@ -38,13 +34,21 @@ pub fn from_tuples(tuples: &[(i32, i32, &[u8])]) -> Vec<IconPixmap> {
             pixel[2] = r;
             pixel[3] = a;
         }
-        result.push(IconPixmap {
-            width: w as u32,
-            height: h as u32,
+        Some(IconPixmap {
+            width: width as u32,
+            height: height as u32,
             data,
-        });
+        })
     }
-    result
+}
+
+/// Convert simple `(width, height, &[u8])` tuples into `IconPixmap`s.
+///
+/// This is the public API for callers who already have raw ARGB32 big-endian
+/// pixel data (e.g. from a decoded image file) and don't want to build
+/// `rustbus::params::Param` trees manually.
+pub fn from_tuples(tuples: &[(i32, i32, &[u8])]) -> Vec<IconPixmap> {
+    tuples.iter().filter_map(|&(w, h, raw)| IconPixmap::from_argb32be(w, h, raw)).collect()
 }
 
 #[cfg(test)]
