@@ -254,9 +254,28 @@ pub fn event(
     call.body.push_variant(0i32).unwrap();
     call.body.push_param(0u32).unwrap(); // timestamp
 
-    conn.send.send_message_write_all(&call)?;
-    // Don't wait for reply - fire and forget
-    Ok(())
+    let serial = conn.send.send_message_write_all(&call)?;
+    // Wait briefly for a reply; ignore timeout (many servers don't reply to Event)
+    loop {
+        match conn.recv.get_next_message(Timeout::Duration(std::time::Duration::from_millis(100))) {
+            Ok(resp) => {
+                if resp.typ == rustbus::message_builder::MessageType::Reply
+                    && resp.dynheader.response_serial == Some(serial)
+                {
+                    return Ok(());
+                }
+                if resp.typ == rustbus::message_builder::MessageType::Error
+                    && resp.dynheader.response_serial == Some(serial)
+                {
+                    return Err(crate::Error::Unmarshal(
+                        rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
+                    ));
+                }
+            }
+            Err(rustbus::connection::Error::TimedOut) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 /// Parse a variant containing (i32, a{sv}, av) into a MenuNode.

@@ -15,6 +15,46 @@ use crate::{Result, TrayEvent};
 const WATCHER_INTERFACE: &str = "org.kde.StatusNotifierWatcher";
 const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 
+const WATCHER_INTROSPECT_XML: &str = r#"<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="org.kde.StatusNotifierWatcher">
+    <method name="RegisterStatusNotifierItem">
+      <arg name="service" type="s" direction="in"/>
+    </method>
+    <method name="RegisterStatusNotifierHost">
+      <arg name="service" type="s" direction="in"/>
+    </method>
+    <property name="RegisteredStatusNotifierItems" type="as" access="read"/>
+    <property name="IsStatusNotifierHostRegistered" type="b" access="read"/>
+    <property name="ProtocolVersion" type="i" access="read"/>
+    <signal name="StatusNotifierItemRegistered">
+      <arg type="s"/>
+    </signal>
+    <signal name="StatusNotifierItemUnregistered">
+      <arg type="s"/>
+    </signal>
+    <signal name="StatusNotifierHostRegistered"/>
+    <signal name="StatusNotifierHostUnregistered"/>
+  </interface>
+  <interface name="org.freedesktop.DBus.Properties">
+    <method name="Get">
+      <arg name="interface" type="s" direction="in"/>
+      <arg name="property" type="s" direction="in"/>
+      <arg name="value" type="v" direction="out"/>
+    </method>
+    <method name="GetAll">
+      <arg name="interface" type="s" direction="in"/>
+      <arg name="properties" type="a{sv}" direction="out"/>
+    </method>
+  </interface>
+  <interface name="org.freedesktop.DBus.Introspectable">
+    <method name="Introspect">
+      <arg name="xml" type="s" direction="out"/>
+    </method>
+  </interface>
+</node>"#;
+
 /// Request the watcher bus names and set up signal subscriptions.
 pub fn register(conn: &mut DuplexConn) -> Result<()> {
     // Request both the freedesktop and KDE well-known names
@@ -78,8 +118,8 @@ pub fn handle_call(
         WATCHER_INTERFACE => handle_watcher_call(conn, msg, member, items, events),
         "org.freedesktop.DBus.Properties" => handle_properties_call(conn, msg, member, items),
         "org.freedesktop.DBus.Introspectable" => {
-            // Silently ignore introspection for now
-            let reply = msg.dynheader.make_response();
+            let mut reply = msg.dynheader.make_response();
+            reply.body.push_param(WATCHER_INTROSPECT_XML).unwrap();
             conn.send.send_message_write_all(&reply)?;
             Ok(())
         }
