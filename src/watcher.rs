@@ -280,6 +280,7 @@ pub fn handle_signal(
     } else if iface == "org.kde.StatusNotifierItem" {
         let sender = msg.dynheader.sender.as_deref().unwrap_or("");
         if !sender.is_empty() {
+            // For NewStatus, the status argument is optional; re-read all properties
             match TrayItem::from_bus(conn, sender) {
                 Ok(item) => {
                     let id = item.id.clone();
@@ -304,6 +305,18 @@ pub fn handle_signal(
                 .collect();
             for id in ids {
                 events.push(TrayEvent::MenuChanged(id));
+            }
+        }
+    } else if iface == "com.canonical.dbusmenu" && member == "ItemActivationRequested" {
+        let sender = msg.dynheader.sender.as_deref().unwrap_or("");
+        if !sender.is_empty() {
+            let ids: Vec<ItemId> = items
+                .values()
+                .filter(|item| item.bus_name == sender)
+                .map(|item| item.id.clone())
+                .collect();
+            for id in ids {
+                events.push(TrayEvent::MenuActivationRequested(id));
             }
         }
     }

@@ -6,6 +6,22 @@ use rustbus::params::{Base, Container, Param};
 
 use crate::Result;
 
+/// An owned property value from dbusmenu.
+#[derive(Debug, Clone)]
+pub enum PropValue {
+    Str(String),
+    Bool(bool),
+    Int(i32),
+    Bytes(Vec<u8>),
+}
+
+/// A single item's owned properties returned by `GetGroupProperties`.
+#[derive(Debug, Clone)]
+pub struct MenuItemProps {
+    pub id: i32,
+    pub props: Vec<(String, PropValue)>,
+}
+
 /// A menu node from GetLayout.
 #[derive(Debug, Clone)]
 pub struct MenuNode {
@@ -54,6 +70,110 @@ pub fn about_to_show(
     let mut parser = resp.body.parser();
     let need_update: bool = parser.get().unwrap_or(false);
     Ok(need_update)
+}
+
+/// Call `com.canonical.dbusmenu.GetGroupProperties` and return owned results.
+pub fn get_group_properties(
+    conn: &mut DuplexConn,
+    bus_name: &str,
+    menu_path: &str,
+    ids: &[i32],
+    property_names: &[&str],
+) -> Result<Vec<MenuItemProps>> {
+    let mut call = rustbus::MessageBuilder::new()
+        .call("GetGroupProperties")
+        .on(menu_path)
+        .with_interface("com.canonical.dbusmenu")
+        .at(bus_name)
+        .build();
+    call.body.push_param(ids).unwrap();
+    call.body.push_param(property_names).unwrap();
+
+    let serial = conn.send.send_message_write_all(&call)?;
+    let resp = loop {
+        let resp = conn.recv.get_next_message(Timeout::Infinite)?;
+        if resp.typ == rustbus::message_builder::MessageType::Reply {
+            break resp;
+        }
+        if resp.typ == rustbus::message_builder::MessageType::Error {
+            return Ok(Vec::new());
+        }
+    };
+    if resp.dynheader.response_serial != Some(serial) {
+        return Ok(Vec::new());
+    }
+
+    let mut parser = resp.body.parser();
+    let param = match parser.get_param() {
+        Ok(p) => p,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let array = match &param {
+        Param::Container(Container::Array(arr)) => &arr.values,
+        _ => return Ok(Vec::new()),
+    };
+
+    let mut result = Vec::new();
+    for elem in array {
+        let fields = match elem {
+            Param::Container(Container::Struct(s)) => s,
+            _ => continue,
+        };
+        if fields.len() < 2 {
+            continue;
+        }
+        let id = match &fields[0] {
+            Param::Base(Base::Int32(v)) => *v,
+            _ => continue,
+        };
+        let props = match &fields[1] {
+            Param::Container(Container::Dict(d)) => convert_props(&d.map),
+            _ => continue,
+        };
+        result.push(MenuItemProps { id, props });
+    }
+    Ok(result)
+}
+
+/// Call `com.canonical.dbusmenu.GetProperty` and return the owned value.
+pub fn get_property(
+    conn: &mut DuplexConn,
+    bus_name: &str,
+    menu_path: &str,
+    id: i32,
+    name: &str,
+) -> Result<Option<PropValue>> {
+    let mut call = rustbus::MessageBuilder::new()
+        .call("GetProperty")
+        .on(menu_path)
+        .with_interface("com.canonical.dbusmenu")
+        .at(bus_name)
+        .build();
+    call.body.push_param(id).unwrap();
+    call.body.push_param(name).unwrap();
+
+    let serial = conn.send.send_message_write_all(&call)?;
+    let resp = loop {
+        let resp = conn.recv.get_next_message(Timeout::Infinite)?;
+        if resp.typ == rustbus::message_builder::MessageType::Reply {
+            break resp;
+        }
+        if resp.typ == rustbus::message_builder::MessageType::Error {
+            return Ok(None);
+        }
+    };
+    if resp.dynheader.response_serial != Some(serial) {
+        return Ok(None);
+    }
+
+    let mut parser = resp.body.parser();
+    let param = match parser.get_param() {
+        Ok(p) => p,
+        Err(_) => return Ok(None),
+    };
+
+    Ok(extract_prop_value(&param))
 }
 
 /// Call `GetLayout(parent_id, 1, &[])` and parse the children.
@@ -290,6 +410,48 @@ fn get_bytes_prop(props: &rustbus::params::DictMap, key: &str) -> Vec<u8> {
     Vec::new()
 }
 
+/// Convert a borrowed DictMap into owned (String, PropValue) pairs.
+fn convert_props(dict: &rustbus::params::DictMap) -> Vec<(String, PropValue)> {
+    let mut result = Vec::new();
+    for (k, v) in dict {
+        let key = match k {
+            Base::StringRef(s) => s.to_string(),
+            Base::String(s) => s.clone(),
+            _ => continue,
+        };
+        if let Some(val) = extract_prop_value(v) {
+            result.push((key, val));
+        }
+    }
+    result
+}
+
+/// Extract an owned PropValue from a Param (expects a variant wrapper).
+fn extract_prop_value(param: &Param) -> Option<PropValue> {
+    let inner = match param {
+        Param::Container(Container::Variant(v)) => &v.value,
+        other => other,
+    };
+    match inner {
+        Param::Base(Base::StringRef(s)) => Some(PropValue::Str(s.to_string())),
+        Param::Base(Base::String(s)) => Some(PropValue::Str(s.clone())),
+        Param::Base(Base::Boolean(b)) => Some(PropValue::Bool(*b)),
+        Param::Base(Base::Int32(n)) => Some(PropValue::Int(*n)),
+        Param::Base(Base::Byte(b)) => Some(PropValue::Bytes(vec![*b])),
+        Param::Container(Container::Array(arr)) => {
+            let bytes: Vec<u8> = arr.values.iter().filter_map(|e| {
+                if let Param::Base(Base::Byte(b)) = e { Some(*b) } else { None }
+            }).collect();
+            if bytes.len() == arr.values.len() {
+                Some(PropValue::Bytes(bytes))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +565,76 @@ mod tests {
     fn parse_menu_node_wrong_type() {
         let node = Param::Base(Base::Int32(0));
         assert!(parse_menu_node(&node).is_none());
+    }
+
+    #[test]
+    fn extract_prop_value_str() {
+        let p = make_variant_str("hello");
+        match extract_prop_value(&p) {
+            Some(PropValue::Str(s)) => assert_eq!(s, "hello"),
+            _ => panic!("expected Str"),
+        }
+    }
+
+    #[test]
+    fn extract_prop_value_bool() {
+        let p = make_variant_bool(true);
+        match extract_prop_value(&p) {
+            Some(PropValue::Bool(b)) => assert!(b),
+            _ => panic!("expected Bool"),
+        }
+    }
+
+    #[test]
+    fn extract_prop_value_int() {
+        let p = make_variant_i32(42);
+        match extract_prop_value(&p) {
+            Some(PropValue::Int(n)) => assert_eq!(n, 42),
+            _ => panic!("expected Int"),
+        }
+    }
+
+    #[test]
+    fn extract_prop_value_bytes_variant() {
+        let bytes_param = Param::Container(Container::Array(rustbus::params::Array {
+            element_sig: rustbus::signature::Type::Base(rustbus::signature::Base::Byte),
+            values: vec![
+                Param::Base(Base::Byte(0xAA)),
+                Param::Base(Base::Byte(0xBB)),
+            ],
+        }));
+        let p = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+            value: bytes_param,
+        })));
+        match extract_prop_value(&p) {
+            Some(PropValue::Bytes(b)) => assert_eq!(b, vec![0xAA, 0xBB]),
+            _ => panic!("expected Bytes"),
+        }
+    }
+
+    #[test]
+    fn extract_prop_value_none_for_struct() {
+        let p = Param::Container(Container::Struct(vec![]));
+        assert!(extract_prop_value(&p).is_none());
+    }
+
+    #[test]
+    fn convert_props_basic() {
+        let mut dict = rustbus::params::DictMap::new();
+        dict.insert(Base::String("label".to_owned()), make_variant_str("Test"));
+        dict.insert(Base::String("enabled".to_owned()), make_variant_bool(false));
+        let result = convert_props(&dict);
+        assert_eq!(result.len(), 2);
+        let label = result.iter().find(|(k, _)| k == "label").unwrap();
+        match &label.1 {
+            PropValue::Str(s) => assert_eq!(s, "Test"),
+            _ => panic!("expected Str"),
+        }
+        let enabled = result.iter().find(|(k, _)| k == "enabled").unwrap();
+        match &enabled.1 {
+            PropValue::Bool(b) => assert!(!b),
+            _ => panic!("expected Bool"),
+        }
     }
 }

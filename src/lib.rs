@@ -14,6 +14,7 @@ use rustbus::connection::Timeout;
 
 pub use icon::{from_tuples, IconPixmap};
 pub use item::{ItemId, ToolTip, TrayItem};
+pub use menu::{MenuItemProps, MenuNode, PropValue};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -35,6 +36,8 @@ pub enum TrayEvent {
     ItemChanged(ItemId),
     ItemRemoved(ItemId),
     MenuChanged(ItemId),
+    MenuActivationRequested(ItemId),
+    HostShutdown,
 }
 
 pub struct TrayHost {
@@ -162,6 +165,69 @@ impl TrayHost {
         call.body.push_param(delta).unwrap();
         call.body.push_param(orientation).unwrap();
         self.conn.send.send_message_write_all(&call)?;
+        Ok(())
+    }
+
+    /// Call the item's `ProvideXdgActivationToken` method.
+    pub fn provide_xdg_activation_token(&mut self, id: &ItemId, token: &str) -> Result<()> {
+        let item = self.items.get(id).ok_or_else(|| crate::Error::Unmarshal(
+            rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
+        ))?;
+        let mut call = rustbus::MessageBuilder::new()
+            .call("ProvideXdgActivationToken")
+            .on(&item.object_path)
+            .with_interface("org.kde.StatusNotifierItem")
+            .at(&item.bus_name)
+            .build();
+        call.body.push_param(token).unwrap();
+        self.conn.send.send_message_write_all(&call)?;
+        Ok(())
+    }
+
+    /// Get properties for multiple menu items at once via `GetGroupProperties`.
+    pub fn get_menu_group_properties(
+        &mut self,
+        id: &ItemId,
+        ids: &[i32],
+        property_names: &[&str],
+    ) -> Result<Vec<menu::MenuItemProps>> {
+        let item = match self.items.get(id) {
+            Some(i) => i,
+            None => return Ok(Vec::new()),
+        };
+        if item.menu_path.is_empty() || item.menu_path == "/" {
+            return Ok(Vec::new());
+        }
+        menu::get_group_properties(&mut self.conn, &item.bus_name, &item.menu_path, ids, property_names)
+    }
+
+    /// Get a single property from a menu item via `GetProperty`.
+    pub fn get_menu_property(
+        &mut self,
+        id: &ItemId,
+        menu_id: i32,
+        name: &str,
+    ) -> Result<Option<menu::PropValue>> {
+        let item = match self.items.get(id) {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+        if item.menu_path.is_empty() || item.menu_path == "/" {
+            return Ok(None);
+        }
+        menu::get_property(&mut self.conn, &item.bus_name, &item.menu_path, menu_id, name)
+    }
+
+    /// Emit `StatusNotifierHostUnregistered` and clean up.
+    pub fn shutdown(&mut self) -> Result<()> {
+        let sig = rustbus::MessageBuilder::new()
+            .signal(
+                "org.kde.StatusNotifierWatcher",
+                "StatusNotifierHostUnregistered",
+                "/StatusNotifierWatcher",
+            )
+            .build();
+        self.conn.send.send_message_write_all(&sig)?;
         Ok(())
     }
 
