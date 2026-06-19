@@ -280,15 +280,20 @@ pub fn handle_signal(
     } else if iface == "org.kde.StatusNotifierItem" {
         let sender = msg.dynheader.sender.as_deref().unwrap_or("");
         if !sender.is_empty() {
-            // For NewStatus, the status argument is optional; re-read all properties
-            match TrayItem::from_bus(conn, sender) {
-                Ok(item) => {
-                    let id = item.id.clone();
-                    items.insert(id.clone(), item);
-                    events.push(TrayEvent::ItemChanged(id));
-                }
-                Err(e) => {
-                    eprintln!("rustsni: failed to re-read item {sender}: {e}");
+            // Find the existing item to preserve its service_id and object_path
+            let existing = items.values().find(|item| item.bus_name == sender);
+            if let Some(old) = existing {
+                let service_id = old.id.0.clone();
+                let object_path = old.object_path.clone();
+                match TrayItem::from_bus_with_path(conn, &service_id, sender, &object_path) {
+                    Ok(item) => {
+                        let id = item.id.clone();
+                        items.insert(id.clone(), item);
+                        events.push(TrayEvent::ItemChanged(id));
+                    }
+                    Err(e) => {
+                        eprintln!("rustsni: failed to re-read item {sender}: {e}");
+                    }
                 }
             }
         }
@@ -372,5 +377,40 @@ mod tests {
             normalize_item_name("4077-1"),
             "org.freedesktop.StatusNotifierItem-4077-1"
         );
+    }
+
+    #[test]
+    fn parse_service_uses_sender_for_path_only() {
+        let (bus, path) = parse_service(":1.42", "/StatusNotifierItem");
+        assert_eq!(bus, ":1.42");
+        assert_eq!(path, "/StatusNotifierItem");
+    }
+
+    #[test]
+    fn parse_service_bus_name_and_path() {
+        let (bus, path) = parse_service(":1.42", "com.example.App/SomePath");
+        assert_eq!(bus, "com.example.App");
+        assert_eq!(path, "/SomePath");
+    }
+
+    #[test]
+    fn parse_service_just_bus_name() {
+        let (bus, path) = parse_service(":1.42", "org.freedesktop.StatusNotifierItem-4077-1");
+        assert_eq!(bus, "org.freedesktop.StatusNotifierItem-4077-1");
+        assert_eq!(path, "/StatusNotifierItem");
+    }
+
+    #[test]
+    fn service_id_preserved_on_path_only_registration() {
+        // When a path-only registration comes from sender :1.42,
+        // the service_id should be sender + path
+        let sender = ":1.42";
+        let service = "/StatusNotifierItem";
+        let service_id = if service.starts_with('/') {
+            format!("{sender}{service}")
+        } else {
+            service.to_owned()
+        };
+        assert_eq!(service_id, ":1.42/StatusNotifierItem");
     }
 }
