@@ -6,7 +6,7 @@ mod item;
 mod menu;
 mod watcher;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, RawFd};
 
 use rustbus::connection::ll_conn::DuplexConn;
@@ -28,6 +28,8 @@ pub enum Error {
     WatcherAlreadyRunning,
     #[error("item not found: {0}")]
     ItemNotFound(ItemId),
+    #[error("D-Bus method call failed: {0}")]
+    MethodCall(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -45,6 +47,15 @@ pub enum TrayEvent {
 pub struct TrayHost {
     conn: DuplexConn,
     items: HashMap<ItemId, TrayItem>,
+    pending_events: Vec<TrayEvent>,
+    /// Unique names (:1.xxx) not yet probed for SNI support.
+    pending_unique_names: Vec<String>,
+    /// Retry count per unique name (discard after 3 consecutive timeouts).
+    pending_unique_retries: HashMap<String, u32>,
+    /// Serial of an in-flight GetAll probe, if any.
+    probe_serial: Option<(std::num::NonZeroU32, String, std::time::Instant)>,
+    /// Messages buffered during synchronous property reads.
+    pending_messages: VecDeque<rustbus::message_builder::MarshalledMessage>,
 }
 
 impl TrayHost {
@@ -61,10 +72,24 @@ impl TrayHost {
         let mut this = Self {
             conn,
             items: HashMap::new(),
+            pending_events: Vec::new(),
+            pending_unique_names: Vec::new(),
+            pending_unique_retries: HashMap::new(),
+            probe_serial: None,
+            pending_messages: VecDeque::new(),
         };
 
         watcher::register(&mut this.conn)?;
         host::register(&mut this.conn)?;
+
+        // Discover already-running tray items (bar-started-after-apps case)
+        match watcher::discover_existing_items(&mut this.conn, &mut this.pending_messages) {
+            Ok(pending) => {
+                this.pending_unique_names = pending;
+
+            }
+            Err(_e) => {}
+        }
 
         Ok(this)
     }
@@ -76,15 +101,24 @@ impl TrayHost {
 
     /// Non-blocking: read all pending D-Bus messages and return tray events.
     /// Call this when `fd()` becomes readable.
+    ///
+    /// Also probes one pending unique name per call (async, non-blocking).
+    /// The probe never blocks the caller — it sends GetAll, stores the serial,
+    /// and processes the reply on the next `poll()` call.
     pub fn poll(&mut self) -> Result<Vec<TrayEvent>> {
-        let mut events = Vec::new();
+        use rustbus::message_builder::MessageType;
 
-        // First, process any messages buffered during property reads
-        while let Some(msg) = item::take_pending_message() {
+        let mut events = self.pending_events.drain(..).collect();
+
+        // Process any messages buffered during property reads
+        while let Some(msg) = self.pending_messages.pop_front() {
             self.dispatch(msg, &mut events)?;
         }
 
-        // Then read from the socket
+        // Check if the active probe's reply has arrived
+        let mut probe_done = false;
+
+        // Read available messages from the socket
         loop {
             match self.conn.recv.read_once(Timeout::Nonblock) {
                 Ok(()) => {}
@@ -95,9 +129,98 @@ impl TrayHost {
                 break;
             }
             let msg = self.conn.recv.get_next_message(Timeout::Nonblock)?;
+
+            // Check if this message matches the active probe
+            if let Some((serial, _, _)) = self.probe_serial {
+                if msg.dynheader.response_serial == Some(serial) {
+                    match msg.typ {
+                        MessageType::Reply => {
+                            // Success — it's an SNI item
+                            probe_done = true;
+                            let name = self.probe_serial.take().unwrap().1;
+                            self.process_probe_ok(&name, msg, &mut events);
+                            continue;
+                        }
+                        MessageType::Error => {
+                            // Error (UnknownInterface) — not an SNI item
+                            probe_done = true;
+                            self.probe_serial.take();
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Not a probe reply — dispatch normally
             self.dispatch(msg, &mut events)?;
         }
+
+        // Check probe timeout (500ms max per probe).
+        // On timeout the name is re-queued (up to 3 retries) so it gets
+        // retried on a later poll. After 3 consecutive timeouts the name is
+        // discarded — it likely belongs to a non-SNI process that doesn't
+        // respond to GetAll.
+        if !probe_done {
+            if let Some((_, _, deadline)) = self.probe_serial.as_ref() {
+                if *deadline <= std::time::Instant::now() {
+                    let name = self.probe_serial.take().unwrap().1;
+                    let retries = self.pending_unique_retries.entry(name.clone()).or_insert(0);
+                    if *retries < 3 {
+                        *retries += 1;
+                        self.pending_unique_names.push(name);
+                    } else {
+                        self.pending_unique_retries.remove(&name);
+                    }
+                }
+            }
+        }
+
+        // Start next probe if none active and there are pending names
+        if self.probe_serial.is_none() && !self.pending_unique_names.is_empty() {
+            let name = self.pending_unique_names.remove(0);
+            match item::TrayItem::send_get_all(&mut self.conn, &name, "/StatusNotifierItem") {
+                Ok(serial) => {
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_millis(500);
+                    self.probe_serial = Some((serial, name, deadline));
+                }
+                Err(_) => {
+                    // Failed to send — skip this name
+                }
+            }
+        }
+
         Ok(events)
+    }
+
+    /// Process a successful probe reply (GetAll returned a valid dict).
+    fn process_probe_ok(
+        &mut self,
+        name: &str,
+        reply: rustbus::message_builder::MarshalledMessage,
+        events: &mut Vec<TrayEvent>,
+    ) {
+        match item::TrayItem::from_get_all_reply(&reply, name, name, "/StatusNotifierItem") {
+            Ok(item) => {
+                // Deduplicate: skip if this item's `Id` already registered
+                if self.items.values().any(|e| !e.item_id.is_empty() && e.item_id == item.item_id) {
+                    return;
+                }
+
+                let id = item.id.clone();
+                self.items.insert(id.clone(), item);
+
+                let mut sig = rustbus::MessageBuilder::new()
+                    .signal(crate::watcher::WATCHER_INTERFACE, "StatusNotifierItemRegistered", crate::watcher::WATCHER_PATH)
+                    .build();
+                sig.body.push_param(name).unwrap();
+                let _ = self.conn.send.send_message_write_all(&sig);
+
+                events.push(TrayEvent::ItemAdded(id));
+            }
+            Err(_) => {}
+        }
     }
 
     /// Current tray items.
@@ -150,30 +273,13 @@ impl TrayHost {
     /// Call the item's `Scroll` method.
     pub fn scroll(&mut self, id: &ItemId, delta: i32, orientation: &str) -> Result<()> {
         let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
-        let mut call = rustbus::MessageBuilder::new()
-            .call("Scroll")
-            .on(&item.object_path)
-            .with_interface("org.kde.StatusNotifierItem")
-            .at(&item.bus_name)
-            .build();
-        call.body.push_param(delta).unwrap();
-        call.body.push_param(orientation).unwrap();
-        self.conn.send.send_message_write_all(&call)?;
-        Ok(())
+        item::call_method_i32_str(&mut self.conn, &item.bus_name, &item.object_path, "Scroll", delta, orientation)
     }
 
     /// Call the item's `ProvideXdgActivationToken` method.
     pub fn provide_xdg_activation_token(&mut self, id: &ItemId, token: &str) -> Result<()> {
         let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
-        let mut call = rustbus::MessageBuilder::new()
-            .call("ProvideXdgActivationToken")
-            .on(&item.object_path)
-            .with_interface("org.kde.StatusNotifierItem")
-            .at(&item.bus_name)
-            .build();
-        call.body.push_param(token).unwrap();
-        self.conn.send.send_message_write_all(&call)?;
-        Ok(())
+        item::call_method_str(&mut self.conn, &item.bus_name, &item.object_path, "ProvideXdgActivationToken", token)
     }
 
     /// Get properties for multiple menu items at once via `GetGroupProperties`.
@@ -210,7 +316,7 @@ impl TrayHost {
         menu::get_property(&mut self.conn, &item.bus_name, &item.menu_path, menu_id, name)
     }
 
-    /// Emit `StatusNotifierHostUnregistered` and clean up.
+    /// Emit `StatusNotifierHostUnregistered` and push `HostShutdown`.
     pub fn shutdown(&mut self) -> Result<()> {
         let sig = rustbus::MessageBuilder::new()
             .signal(
@@ -220,6 +326,7 @@ impl TrayHost {
             )
             .build();
         self.conn.send.send_message_write_all(&sig)?;
+        self.pending_events.push(TrayEvent::HostShutdown);
         Ok(())
     }
 
@@ -232,11 +339,11 @@ impl TrayHost {
 
         match msg.typ {
             MessageType::Signal => {
-                watcher::handle_signal(&mut self.conn, &msg, &mut self.items, events)?;
+                watcher::handle_signal(&mut self.conn, &msg, &mut self.items, events, &mut self.pending_messages)?;
             }
             MessageType::Call => {
                 // Handle all incoming method calls (watcher, properties, etc.)
-                watcher::handle_call(&mut self.conn, &msg, &mut self.items, events)?;
+                watcher::handle_call(&mut self.conn, &msg, &mut self.items, events, &mut self.pending_messages)?;
             }
             _ => {}
         }

@@ -52,56 +52,161 @@ pub struct TrayItem {
 const SNI_IFACE: &str = "org.kde.StatusNotifierItem";
 
 impl TrayItem {
-    /// Read properties from the item over D-Bus using individual Get calls.
-    pub fn from_bus(conn: &mut DuplexConn, bus_name: &str) -> Result<Self> {
-        Self::from_bus_with_path(conn, bus_name, bus_name, "/StatusNotifierItem")
+    /// Send a `Properties.GetAll` call. Returns the serial number for matching the reply.
+    pub fn send_get_all(
+        conn: &mut DuplexConn,
+        bus_name: &str,
+        object_path: &str,
+    ) -> Result<std::num::NonZeroU32> {
+        let mut call = rustbus::MessageBuilder::new()
+            .call("GetAll")
+            .on(object_path)
+            .with_interface("org.freedesktop.DBus.Properties")
+            .at(bus_name)
+            .build();
+        call.body.push_param(SNI_IFACE).unwrap();
+        let serial = conn.send.send_message_write_all(&call)?;
+        Ok(serial)
     }
 
-    /// Read properties with a specific object path.
-    pub fn from_bus_with_path(conn: &mut DuplexConn, service_id: &str, bus_name: &str, object_path: &str) -> Result<Self> {
-        let mut item = TrayItem {
+    /// Build a TrayItem from a `GetAll` reply message. The reply must be a Reply
+    /// (not Error) — callers should check the response_serial matches their call.
+    pub fn from_get_all_reply(
+        reply: &rustbus::message_builder::MarshalledMessage,
+        service_id: &str,
+        bus_name: &str,
+        object_path: &str,
+    ) -> Result<Self> {
+        use rustbus::params::{Base as PBase, Container, Param};
+        use std::collections::HashMap;
+
+        // Parse a{sv} dict
+        let mut parser = reply.body.parser();
+        let mut props: HashMap<String, Param> = HashMap::new();
+        if let Ok(param) = parser.get_param() {
+            if let Param::Container(Container::Dict(dict)) = &param {
+                for (key, val) in &dict.map {
+                    let key_str = match key {
+                        PBase::String(s) => s.clone(),
+                        PBase::StringRef(s) => s.to_string(),
+                        _ => continue,
+                    };
+                    props.insert(key_str, val.clone());
+                }
+            }
+        }
+
+        // Extract value helpers
+        let get_str = |props: &HashMap<String, Param>, key: &str| -> String {
+            match props.get(key) {
+                Some(Param::Container(Container::Variant(v))) => match &v.value {
+                    Param::Base(PBase::String(s)) => s.clone(),
+                    Param::Base(PBase::StringRef(s)) => s.to_string(),
+                    Param::Base(PBase::ObjectPath(p)) => p.to_string(),
+                    Param::Base(PBase::ObjectPathRef(p)) => p.to_string(),
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            }
+        };
+        let get_bool = |props: &HashMap<String, Param>, key: &str| -> bool {
+            match props.get(key) {
+                Some(Param::Container(Container::Variant(v))) => match &v.value {
+                    Param::Base(PBase::Boolean(b)) => *b,
+                    _ => false,
+                },
+                _ => false,
+            }
+        };
+        let get_int = |props: &HashMap<String, Param>, key: &str| -> i32 {
+            match props.get(key) {
+                Some(Param::Container(Container::Variant(v))) => match &v.value {
+                    Param::Base(PBase::Int32(i)) => *i,
+                    _ => 0,
+                },
+                _ => 0,
+            }
+        };
+        let get_pixmaps = |props: &HashMap<String, Param>, key: &str| -> Vec<IconPixmap> {
+            match props.get(key) {
+                Some(Param::Container(Container::Variant(v))) => {
+                    extract_pixmaps_from_param(&Param::Container(Container::Variant(v.clone())))
+                }
+                _ => Vec::new(),
+            }
+        };
+        let get_tooltip = |props: &HashMap<String, Param>, key: &str| -> ToolTip {
+            match props.get(key) {
+                Some(Param::Container(Container::Variant(v))) => {
+                    extract_tooltip_from_param(&Param::Container(Container::Variant(v.clone())))
+                }
+                _ => ToolTip::default(),
+            }
+        };
+
+        let menu_path = match props.get("Menu") {
+            Some(Param::Container(Container::Variant(v))) => match &v.value {
+                Param::Base(PBase::ObjectPath(p)) => p.to_string(),
+                Param::Base(PBase::ObjectPathRef(p)) => p.to_string(),
+                Param::Base(PBase::String(s)) => s.clone(),
+                Param::Base(PBase::StringRef(s)) => s.to_string(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+
+        Ok(TrayItem {
             id: ItemId(service_id.to_owned()),
             bus_name: bus_name.to_owned(),
             object_path: object_path.to_owned(),
-            category: String::new(),
-            item_id: String::new(),
-            title: String::new(),
-            status: String::new(),
-            window_id: 0,
-            icon_theme_path: String::new(),
-            icon_name: String::new(),
-            icon_pixmaps: Vec::new(),
-            attention_icon_name: String::new(),
-            attention_icon_pixmaps: Vec::new(),
-            attention_movie_name: String::new(),
-            overlay_icon_name: String::new(),
-            overlay_icon_pixmaps: Vec::new(),
-            item_is_menu: false,
-            menu_path: String::new(),
-            tooltip: ToolTip::default(),
+            category: get_str(&props, "Category"),
+            item_id: get_str(&props, "Id"),
+            title: get_str(&props, "Title"),
+            status: get_str(&props, "Status"),
+            window_id: get_int(&props, "WindowId"),
+            icon_theme_path: get_str(&props, "IconThemePath"),
+            icon_name: get_str(&props, "IconName"),
+            icon_pixmaps: get_pixmaps(&props, "IconPixmap"),
+            attention_icon_name: get_str(&props, "AttentionIconName"),
+            attention_icon_pixmaps: get_pixmaps(&props, "AttentionIconPixmap"),
+            attention_movie_name: get_str(&props, "AttentionMovieName"),
+            overlay_icon_name: get_str(&props, "OverlayIconName"),
+            overlay_icon_pixmaps: get_pixmaps(&props, "OverlayIconPixmap"),
+            item_is_menu: get_bool(&props, "ItemIsMenu"),
+            menu_path,
+            tooltip: get_tooltip(&props, "ToolTip"),
+        })
+    }
+
+    /// Read all properties in a single `Properties.GetAll` call (1 D-Bus round trip).
+    ///
+    /// Blocks until the reply arrives (Infinite timeout). Non-reply messages
+    /// arriving during the wait are buffered into `pending`.
+    pub fn from_bus_get_all(
+        conn: &mut DuplexConn,
+        service_id: &str,
+        bus_name: &str,
+        object_path: &str,
+        pending: &mut std::collections::VecDeque<rustbus::message_builder::MarshalledMessage>,
+    ) -> Result<Self> {
+        use rustbus::message_builder::MessageType;
+
+        let serial = Self::send_get_all(conn, bus_name, object_path)?;
+
+        let reply = loop {
+            let msg = conn.recv.get_next_message(Timeout::Infinite)?;
+            if msg.typ == MessageType::Reply && msg.dynheader.response_serial == Some(serial) {
+                break msg;
+            }
+            // Error for our call (UnknownInterface etc.) → not an SNI item
+            if msg.typ == MessageType::Error && msg.dynheader.response_serial == Some(serial) {
+                let err_name: String = msg.body.parser().get().unwrap_or_default();
+                return Err(crate::Error::MethodCall(err_name));
+            }
+            pending.push_back(msg);
         };
 
-        item.category = get_string(conn, bus_name, object_path, "Category").unwrap_or_default();
-        item.item_id = get_string(conn, bus_name, object_path, "Id").unwrap_or_default();
-        item.title = get_string(conn, bus_name, object_path, "Title").unwrap_or_default();
-        item.status = get_string(conn, bus_name, object_path, "Status").unwrap_or_default();
-        item.window_id = get_int(conn, bus_name, object_path, "WindowId").unwrap_or(0);
-        item.icon_theme_path = get_string(conn, bus_name, object_path, "IconThemePath").unwrap_or_default();
-        item.icon_name = get_string(conn, bus_name, object_path, "IconName").unwrap_or_default();
-        item.attention_icon_name =
-            get_string(conn, bus_name, object_path, "AttentionIconName").unwrap_or_default();
-        item.overlay_icon_name =
-            get_string(conn, bus_name, object_path, "OverlayIconName").unwrap_or_default();
-        item.attention_movie_name =
-            get_string(conn, bus_name, object_path, "AttentionMovieName").unwrap_or_default();
-        item.item_is_menu = get_bool(conn, bus_name, object_path, "ItemIsMenu").unwrap_or_default();
-        item.menu_path = get_string(conn, bus_name, object_path, "Menu").unwrap_or_default();
-        item.icon_pixmaps = get_pixmaps(conn, bus_name, object_path, "IconPixmap");
-        item.attention_icon_pixmaps = get_pixmaps(conn, bus_name, object_path, "AttentionIconPixmap");
-        item.overlay_icon_pixmaps = get_pixmaps(conn, bus_name, object_path, "OverlayIconPixmap");
-        item.tooltip = get_tooltip(conn, bus_name, object_path);
-
-        Ok(item)
+        Self::from_get_all_reply(&reply, service_id, bus_name, object_path)
     }
 }
 
@@ -135,122 +240,6 @@ impl TrayItem {
         paths.push("/usr/share/pixmaps");
         paths
     }
-}
-
-thread_local! {
-    static PENDING_MESSAGES: std::cell::RefCell<std::collections::VecDeque<rustbus::message_builder::MarshalledMessage>> =
-        std::cell::RefCell::new(std::collections::VecDeque::new());
-}
-
-/// Get a pending message that was received while waiting for a property response.
-pub fn take_pending_message() -> Option<rustbus::message_builder::MarshalledMessage> {
-    PENDING_MESSAGES.with(|msgs| msgs.borrow_mut().pop_front())
-}
-
-/// Call `Properties.Get(interface, property)`, skip signals, return reply.
-/// Non-reply messages are buffered for later processing.
-fn call_get_property(
-    conn: &mut DuplexConn,
-    bus_name: &str,
-    object_path: &str,
-    prop: &str,
-) -> Result<rustbus::message_builder::MarshalledMessage> {
-    let mut call = rustbus::MessageBuilder::new()
-        .call("Get")
-        .on(object_path)
-        .with_interface("org.freedesktop.DBus.Properties")
-        .at(bus_name)
-        .build();
-    call.body.push_param(SNI_IFACE).unwrap();
-    call.body.push_param(prop).unwrap();
-
-    let serial = conn.send.send_message_write_all(&call)?;
-    loop {
-        let resp = conn.recv.get_next_message(Timeout::Infinite)?;
-        match resp.typ {
-            rustbus::message_builder::MessageType::Reply => {
-                if resp.dynheader.response_serial != Some(serial) {
-                    return Err(crate::Error::Unmarshal(
-                        rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
-                    ));
-                }
-                return Ok(resp);
-            }
-            rustbus::message_builder::MessageType::Error => {
-                if resp.dynheader.response_serial == Some(serial) {
-                    return Err(crate::Error::Unmarshal(
-                        rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
-                    ));
-                }
-                // Error for a different message - buffer it
-                PENDING_MESSAGES.with(|msgs| msgs.borrow_mut().push_back(resp));
-            }
-            _ => {
-                // Signal or Call for a different message - buffer it
-                PENDING_MESSAGES.with(|msgs| msgs.borrow_mut().push_back(resp));
-            }
-        }
-    }
-}
-
-fn get_string(conn: &mut DuplexConn, bus_name: &str, object_path: &str, prop: &str) -> Result<String> {
-    let resp = call_get_property(conn, bus_name, object_path, prop)?;
-    let mut parser = resp.body.parser();
-    let val: rustbus::wire::unmarshal::traits::Variant = parser.get()?;
-    // Try string first, then object path
-    if let Ok(s) = val.get::<&str>() {
-        return Ok(s.to_owned());
-    }
-    if let Ok(p) = val.get::<rustbus::wire::ObjectPath<String>>() {
-        return Ok(p.as_ref().to_owned());
-    }
-    Ok(String::new())
-}
-
-fn get_bool(conn: &mut DuplexConn, bus_name: &str, object_path: &str, prop: &str) -> Result<bool> {
-    let resp = call_get_property(conn, bus_name, object_path, prop)?;
-    let mut parser = resp.body.parser();
-    let val: rustbus::wire::unmarshal::traits::Variant = parser.get()?;
-    match val.get::<bool>() {
-        Ok(b) => Ok(b),
-        Err(_) => Ok(false),
-    }
-}
-
-fn get_int(conn: &mut DuplexConn, bus_name: &str, object_path: &str, prop: &str) -> Result<i32> {
-    let resp = call_get_property(conn, bus_name, object_path, prop)?;
-    let mut parser = resp.body.parser();
-    let val: rustbus::wire::unmarshal::traits::Variant = parser.get()?;
-    match val.get::<i32>() {
-        Ok(v) => Ok(v),
-        Err(_) => Ok(0),
-    }
-}
-
-fn get_pixmaps(conn: &mut DuplexConn, bus_name: &str, object_path: &str, prop: &str) -> Vec<IconPixmap> {
-    let resp = match call_get_property(conn, bus_name, object_path, prop) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    let mut parser = resp.body.parser();
-    let param = match parser.get_param() {
-        Ok(p) => p,
-        Err(_) => return Vec::new(),
-    };
-    extract_pixmaps_from_param(&param)
-}
-
-fn get_tooltip(conn: &mut DuplexConn, bus_name: &str, object_path: &str) -> ToolTip {
-    let resp = match call_get_property(conn, bus_name, object_path, "ToolTip") {
-        Ok(r) => r,
-        Err(_) => return ToolTip::default(),
-    };
-    let mut parser = resp.body.parser();
-    let param = match parser.get_param() {
-        Ok(p) => p,
-        Err(_) => return ToolTip::default(),
-    };
-    extract_tooltip_from_param(&param)
 }
 
 /// Parse a variant containing (sa(iiay)ss) into a ToolTip.
@@ -369,6 +358,46 @@ pub fn call_method(
         .build();
     call.body.push_param(x).unwrap();
     call.body.push_param(y).unwrap();
+    conn.send.send_message_write_all(&call)?;
+    Ok(())
+}
+
+/// Call a method with a single string parameter on a StatusNotifierItem.
+pub fn call_method_str(
+    conn: &mut DuplexConn,
+    bus_name: &str,
+    object_path: &str,
+    method: &str,
+    param: &str,
+) -> Result<()> {
+    let mut call = rustbus::MessageBuilder::new()
+        .call(method)
+        .on(object_path)
+        .with_interface(SNI_IFACE)
+        .at(bus_name)
+        .build();
+    call.body.push_param(param).unwrap();
+    conn.send.send_message_write_all(&call)?;
+    Ok(())
+}
+
+/// Call a method with (i32, &str) parameters on a StatusNotifierItem.
+pub fn call_method_i32_str(
+    conn: &mut DuplexConn,
+    bus_name: &str,
+    object_path: &str,
+    method: &str,
+    p1: i32,
+    p2: &str,
+) -> Result<()> {
+    let mut call = rustbus::MessageBuilder::new()
+        .call(method)
+        .on(object_path)
+        .with_interface(SNI_IFACE)
+        .at(bus_name)
+        .build();
+    call.body.push_param(p1).unwrap();
+    call.body.push_param(p2).unwrap();
     conn.send.send_message_write_all(&call)?;
     Ok(())
 }

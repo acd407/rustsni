@@ -37,42 +37,6 @@ pub struct MenuNode {
     pub children: Vec<MenuNode>,
 }
 
-/// Call `com.canonical.dbusmenu.AboutToShow` on a menu item.
-/// Returns `true` if the server says the menu needs updating.
-#[allow(dead_code)]
-pub fn about_to_show(
-    conn: &mut DuplexConn,
-    bus_name: &str,
-    menu_path: &str,
-    id: i32,
-) -> Result<bool> {
-    let mut call = rustbus::MessageBuilder::new()
-        .call("AboutToShow")
-        .on(menu_path)
-        .with_interface("com.canonical.dbusmenu")
-        .at(bus_name)
-        .build();
-    call.body.push_param(id).unwrap();
-
-    let serial = conn.send.send_message_write_all(&call)?;
-    let resp = loop {
-        let resp = conn.recv.get_next_message(Timeout::Infinite)?;
-        if resp.typ == rustbus::message_builder::MessageType::Reply {
-            break resp;
-        }
-        if resp.typ == rustbus::message_builder::MessageType::Error {
-            return Ok(false);
-        }
-    };
-    if resp.dynheader.response_serial != Some(serial) {
-        return Ok(false);
-    }
-
-    let mut parser = resp.body.parser();
-    let need_update: bool = parser.get().unwrap_or(false);
-    Ok(need_update)
-}
-
 /// Call `com.canonical.dbusmenu.GetGroupProperties` and return owned results.
 pub fn get_group_properties(
     conn: &mut DuplexConn,
@@ -191,7 +155,7 @@ pub fn get_layout(
         .at(bus_name)
         .build();
     call.body.push_param(parent_id).unwrap();
-    call.body.push_param(1i32).unwrap(); // recursion_depth
+    call.body.push_param(-1i32).unwrap(); // recursion_depth (-1 = unlimited)
     call.body.push_param(Vec::<&str>::new()).unwrap(); // all properties
 
     let serial = conn.send.send_message_write_all(&call)?;
@@ -281,9 +245,8 @@ pub fn event(
                 if resp.typ == rustbus::message_builder::MessageType::Error
                     && resp.dynheader.response_serial == Some(serial)
                 {
-                    return Err(crate::Error::Unmarshal(
-                        rustbus::wire::errors::UnmarshalError::NotEnoughBytes,
-                    ));
+                    let err_name: String = resp.body.parser().get().unwrap_or_default();
+                    return Err(crate::Error::MethodCall(err_name));
                 }
             }
             Err(rustbus::connection::Error::TimedOut) => return Ok(()),

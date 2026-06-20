@@ -12,8 +12,8 @@ use rustbus::standard_messages;
 use crate::item::{ItemId, TrayItem};
 use crate::{Result, TrayEvent};
 
-const WATCHER_INTERFACE: &str = "org.kde.StatusNotifierWatcher";
-const WATCHER_PATH: &str = "/StatusNotifierWatcher";
+pub(crate) const WATCHER_INTERFACE: &str = "org.kde.StatusNotifierWatcher";
+pub(crate) const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 
 const WATCHER_INTROSPECT_XML: &str = r#"<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
  "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
@@ -63,15 +63,18 @@ pub fn register(conn: &mut DuplexConn) -> Result<()> {
         "org.kde.StatusNotifierWatcher",
     ] {
         let msg = standard_messages::request_name(name, 0);
-        conn.send.send_message_write_all(&msg)?;
-        // Skip signals until we get the reply
+        let serial = conn.send.send_message_write_all(&msg)?;
+        // Wait for the reply matching our serial; skip unrelated signals.
         loop {
             let resp = conn.recv.get_next_message(Timeout::Infinite)?;
-            if resp.typ == rustbus::message_builder::MessageType::Reply {
-                break;
+            if resp.dynheader.response_serial == Some(serial) {
+                match resp.typ {
+                    rustbus::message_builder::MessageType::Reply => break,
+                    _ => return Err(crate::Error::WatcherAlreadyRunning),
+                }
             }
-            if resp.typ == rustbus::message_builder::MessageType::Error {
-                return Err(crate::Error::WatcherAlreadyRunning);
+            if !matches!(resp.typ, rustbus::message_builder::MessageType::Signal) {
+                break; // unexpected — abort spin
             }
         }
     }
@@ -89,12 +92,10 @@ pub fn register(conn: &mut DuplexConn) -> Result<()> {
     conn.send.send_message_write_all(&add_match)?;
 
     // Emit StatusNotifierHostRegistered to notify existing items
-    eprintln!("rustsni: emitting StatusNotifierHostRegistered signal");
     let sig = rustbus::MessageBuilder::new()
         .signal(WATCHER_INTERFACE, "StatusNotifierHostRegistered", WATCHER_PATH)
         .build();
     conn.send.send_message_write_all(&sig)?;
-    eprintln!("rustsni: signal sent");
 
     Ok(())
 }
@@ -105,6 +106,7 @@ pub fn handle_call(
     msg: &MarshalledMessage,
     items: &mut HashMap<ItemId, TrayItem>,
     events: &mut Vec<TrayEvent>,
+    pending: &mut std::collections::VecDeque<rustbus::message_builder::MarshalledMessage>,
 ) -> Result<()> {
     let iface = msg.dynheader.interface.as_deref().unwrap_or("");
     let member = msg.dynheader.member.as_deref().unwrap_or("");
@@ -115,7 +117,7 @@ pub fn handle_call(
     }
 
     match iface {
-        WATCHER_INTERFACE => handle_watcher_call(conn, msg, member, items, events),
+        WATCHER_INTERFACE => handle_watcher_call(conn, msg, member, items, events, pending),
         "org.freedesktop.DBus.Properties" => handle_properties_call(conn, msg, member, items),
         "org.freedesktop.DBus.Introspectable" => {
             let mut reply = msg.dynheader.make_response();
@@ -137,6 +139,7 @@ fn handle_watcher_call(
     member: &str,
     items: &mut HashMap<ItemId, TrayItem>,
     events: &mut Vec<TrayEvent>,
+    pending: &mut std::collections::VecDeque<rustbus::message_builder::MarshalledMessage>,
 ) -> Result<()> {
     match member {
         "RegisterStatusNotifierItem" => {
@@ -153,13 +156,18 @@ fn handle_watcher_call(
             };
 
             // Read item properties from the bus
-            eprintln!("rustsni: registering item {service_id:?}, bus={bus_name:?}, path={object_path:?}");
-            match TrayItem::from_bus_with_path(conn, &service_id, &bus_name, &object_path) {
+            match TrayItem::from_bus_get_all(conn, &service_id, &bus_name, &object_path, pending) {
                 Ok(item) => {
-                    eprintln!("rustsni: item {service_id:?} registered successfully");
-                    let id = item.id.clone();
-                    items.insert(id.clone(), item);
-                    events.push(TrayEvent::ItemAdded(id));
+        
+                    // Deduplicate: if this bus_name is already known (e.g. from step 3
+                    // unique-name probe), skip the insert but still emit ItemChanged.
+                    let is_new = !items.contains_key(&ItemId(service_id.clone()))
+                        && !items.values().any(|existing| existing.bus_name == bus_name);
+                    if is_new {
+                        let id = item.id.clone();
+                        items.insert(id.clone(), item);
+                        events.push(TrayEvent::ItemAdded(id));
+                    }
 
                     // Emit StatusNotifierItemRegistered signal
                     let mut sig = rustbus::MessageBuilder::new()
@@ -168,8 +176,7 @@ fn handle_watcher_call(
                     sig.body.push_param(&service_id as &str).unwrap();
                     conn.send.send_message_write_all(&sig)?;
                 }
-                Err(e) => {
-                    eprintln!("rustsni: failed to read item {bus_name}: {e}");
+                Err(_e) => {
                 }
             }
 
@@ -286,11 +293,10 @@ pub fn handle_signal(
     msg: &MarshalledMessage,
     items: &mut HashMap<ItemId, TrayItem>,
     events: &mut Vec<TrayEvent>,
+    pending: &mut std::collections::VecDeque<rustbus::message_builder::MarshalledMessage>,
 ) -> Result<()> {
     let iface = msg.dynheader.interface.as_deref().unwrap_or("");
     let member = msg.dynheader.member.as_deref().unwrap_or("");
-    eprintln!("rustsni: signal received: iface={iface:?}, member={member:?}");
-
     if iface == "org.freedesktop.DBus" && member == "NameOwnerChanged" {
         let mut parser = msg.body.parser();
         let name: String = parser.get()?;
@@ -325,14 +331,13 @@ pub fn handle_signal(
             if let Some(old) = existing {
                 let service_id = old.id.0.clone();
                 let object_path = old.object_path.clone();
-                match TrayItem::from_bus_with_path(conn, &service_id, sender, &object_path) {
+                match TrayItem::from_bus_get_all(conn, &service_id, sender, &object_path, pending) {
                     Ok(item) => {
                         let id = item.id.clone();
                         items.insert(id.clone(), item);
                         events.push(TrayEvent::ItemChanged(id));
                     }
-                    Err(e) => {
-                        eprintln!("rustsni: failed to re-read item {sender}: {e}");
+                    Err(_e) => {
                     }
                 }
             }
@@ -367,6 +372,50 @@ pub fn handle_signal(
     }
 
     Ok(())
+}
+
+/// Scan D-Bus `ListNames` to collect all unique bus names for async probing.
+///
+/// Returns a list of unique bus names (`:1.xxx`) that should be probed for SNI
+/// support (one per `poll()` call). This discovers items that might have been
+/// running before the bar/watcher started and registered with just a path.
+///
+/// Non-ListNames messages arriving during the synchronous wait are buffered
+/// into `pending` so they are processed by the next `poll()` call instead of
+/// being silently dropped.
+pub fn discover_existing_items(
+    conn: &mut DuplexConn,
+    pending: &mut std::collections::VecDeque<rustbus::message_builder::MarshalledMessage>,
+) -> Result<Vec<String>> {
+    use rustbus::message_builder::MessageType;
+
+    // Call org.freedesktop.DBus.ListNames
+    let list_names = standard_messages::list_names();
+    let serial = conn.send.send_message_write_all(&list_names)?;
+
+    let reply = loop {
+        let msg = conn.recv.get_next_message(Timeout::Infinite)?;
+        if msg.typ == MessageType::Reply && msg.dynheader.response_serial == Some(serial) {
+            break msg;
+        }
+        // Not the ListNames reply — buffer for poll() to process later
+        pending.push_back(msg);
+    };
+
+    let names: Vec<String> = match reply.body.parser().get() {
+        Ok(n) => n,
+        Err(_e) => {
+            return Ok(Vec::new());
+        }
+    };
+
+    // Collect unique names for async probing (one per poll() call)
+    let pending: Vec<String> = names.into_iter()
+        .filter(|n| n.starts_with(":1."))
+        .collect();
+
+
+    Ok(pending)
 }
 
 /// Split a raw SNI service registration string into `(bus_name, object_path)`.
