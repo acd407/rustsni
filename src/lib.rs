@@ -272,42 +272,46 @@ impl TrayHost {
         // Check if the active probe's reply has arrived
         let mut probe_done = false;
 
-        // Read available messages from the socket
+        // Read available messages from the socket.
+        //
+        // A single `read_once` may read several D-Bus messages into the
+        // internal buffer when they arrive in quick succession.  Drain
+        // every complete message before trying to read again.
         loop {
             match self.conn.recv.read_once(Timeout::Nonblock) {
                 Ok(()) => {}
                 Err(rustbus::connection::Error::TimedOut) => break,
                 Err(e) => return Err(e.into()),
             }
-            if !self.conn.recv.buffer_contains_whole_message()? {
-                break;
-            }
-            let msg = self.conn.recv.get_next_message(Timeout::Nonblock)?;
 
-            // Check if this message matches the active probe
-            if let Some((serial, _, _)) = self.probe_serial
-                && msg.dynheader.response_serial == Some(serial)
-            {
-                match msg.typ {
-                    MessageType::Reply => {
-                        // Success — it's an SNI item
-                        probe_done = true;
-                        let name = self.probe_serial.take().unwrap().1;
-                        self.process_probe_ok(&name, msg, &mut events);
-                        continue;
+            while self.conn.recv.buffer_contains_whole_message()? {
+                let msg = self.conn.recv.get_next_message(Timeout::Nonblock)?;
+
+                // Check if this message matches the active probe
+                if let Some((serial, _, _)) = self.probe_serial
+                    && msg.dynheader.response_serial == Some(serial)
+                {
+                    match msg.typ {
+                        MessageType::Reply => {
+                            // Success — it's an SNI item
+                            probe_done = true;
+                            let name = self.probe_serial.take().unwrap().1;
+                            self.process_probe_ok(&name, msg, &mut events);
+                            continue;
+                        }
+                        MessageType::Error => {
+                            // Error (UnknownInterface) — not an SNI item
+                            probe_done = true;
+                            self.probe_serial.take();
+                            continue;
+                        }
+                        _ => {}
                     }
-                    MessageType::Error => {
-                        // Error (UnknownInterface) — not an SNI item
-                        probe_done = true;
-                        self.probe_serial.take();
-                        continue;
-                    }
-                    _ => {}
                 }
-            }
 
-            // Not a probe reply — dispatch normally
-            self.dispatch(msg, &mut events)?;
+                // Not a probe reply — dispatch normally
+                self.dispatch(msg, &mut events)?;
+            }
         }
 
         // Check probe timeout (500ms max per probe).

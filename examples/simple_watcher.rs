@@ -1,13 +1,13 @@
 /// A StatusNotifierItem watcher.
 ///
-/// Starts a TrayHost, registers `fd()` with an event loop (or in this
-/// case a simple poll loop), and prints tray events as they arrive.
+/// Starts a TrayHost, polls periodically, and prints tray events.
 /// Runs until the user presses Ctrl+C.
 ///
 /// Usage:
 ///   cargo run --example simple_watcher
 
 use rustsni::{TrayEvent, TrayHost};
+use std::time::{Duration, Instant};
 
 fn main() {
     let mut host = match TrayHost::new() {
@@ -23,46 +23,58 @@ fn main() {
         host.fd(),
     );
 
-    // In a real application you would register host.fd() with your
-    // poll/epoll loop.  Here we simply poll at a fixed interval.
+    let start = Instant::now();
+    let mut items_prev = 0usize;
+
     loop {
+        let items_before = host.items().len();
         match host.poll() {
             Ok(events) => {
+                let items_after = host.items().len();
+                let dt = start.elapsed().as_secs_f64();
+
+                // Print a summary line whenever the item cache changes,
+                // when events arrive, or every 30 seconds as heartbeat.
+                if !events.is_empty()
+                    || items_after != items_prev
+                    || dt as u64 % 30 == 0 && items_after == items_prev
+                {
+                    items_prev = items_after;
+                    if events.is_empty() && items_before == items_after {
+                        println!("[{dt:6.1}s] poll: no events, {items_after} item(s) cached");
+                    }
+                }
+
                 for ev in &events {
                     match ev {
                         TrayEvent::ItemAdded(id) => {
-                            if let Some(item) = host.items().get(id) {
-                                println!("+ {id}  \"{}\"  [{}]{}",
-                                    item.title, item.status,
-                                    if item.has_menu() { "  ☰" } else { "" },
-                                );
-                            }
+                            let title = host.items().get(id).map(|i| i.title.as_str()).unwrap_or("?");
+                            println!("[{dt:6.1}s]  + {id}  \"{title}\"");
                         }
                         TrayEvent::ItemChanged(id) => {
-                            if let Some(item) = host.items().get(id) {
-                                println!("~ {id}  \"{}\"  [{}]", item.title, item.status);
-                            }
+                            let title = host.items().get(id).map(|i| i.title.as_str()).unwrap_or("?");
+                            println!("[{dt:6.1}s]  ~ {id}  \"{title}\"");
                         }
                         TrayEvent::ItemRemoved(id) => {
-                            println!("- {id}");
+                            println!("[{dt:6.1}s]  - {id}");
                         }
                         TrayEvent::MenuChanged(id) => {
-                            println!("☰ {id} menu changed");
+                            println!("[{dt:6.1}s]  ☰ {id} menu changed");
                         }
                         TrayEvent::MenuActivationRequested(id) => {
-                            println!("☰ {id} menu activation requested");
+                            println!("[{dt:6.1}s]  ☰ {id} menu activation requested");
                         }
                         TrayEvent::HostShutdown => {
-                            println!("⏹ host shutdown");
+                            println!("[{dt:6.1}s]  ⏹ host shutdown");
                             return;
                         }
                     }
                 }
             }
             Err(e) => {
-                eprintln!("poll error: {e}");
+                eprintln!("[{:.1}s] poll error: {e}", start.elapsed().as_secs_f64());
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
