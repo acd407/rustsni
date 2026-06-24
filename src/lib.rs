@@ -415,11 +415,7 @@ impl TrayHost {
     /// Returns [`Error::MethodCall`] if the target does not implement the
     /// `org.kde.StatusNotifierItem` interface. Returns [`Error::Bus`] on
     /// D-Bus I/O errors.
-    pub fn add_item(
-        &mut self,
-        bus_name: &str,
-        object_path: &str,
-    ) -> Result<ItemId> {
+    pub fn add_item(&mut self, bus_name: &str, object_path: &str) -> Result<ItemId> {
         let service_id = bus_name.to_owned();
         let item = item::TrayItem::from_bus_get_all(
             &mut self.conn,

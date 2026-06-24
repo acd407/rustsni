@@ -5,7 +5,6 @@
 ///
 /// Usage:
 ///   cargo run --example simple_watcher
-
 use rustsni::{TrayEvent, TrayHost};
 use std::time::Duration;
 
@@ -30,8 +29,10 @@ fn main() {
                     match ev {
                         TrayEvent::ItemAdded(id) => {
                             if let Some(item) = host.items().get(id) {
-                                println!("+ {id}  \"{}\"  [{}]{}",
-                                    item.title, item.status,
+                                println!(
+                                    "+ {id}  \"{}\"  [{}]{}",
+                                    item.title,
+                                    item.status,
                                     if item.has_menu() { "  ☰" } else { "" },
                                 );
                             }

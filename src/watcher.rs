@@ -344,10 +344,12 @@ pub fn handle_signal(
         // A new process connected.  Probe its unique name ASAP
         // (front of the queue) instead of waiting for hundreds of
         // existing names to be processed first.
-        if old_owner.is_empty() && !new_owner.is_empty() && name.starts_with(":1.") {
-            if !pending_unique_names.contains(&name) {
-                pending_unique_names.insert(0, name.clone());
-            }
+        if old_owner.is_empty()
+            && !new_owner.is_empty()
+            && name.starts_with(":1.")
+            && !pending_unique_names.contains(&name)
+        {
+            pending_unique_names.insert(0, name.clone());
         }
 
         // ── Name disappeared from the bus ───────────────────────

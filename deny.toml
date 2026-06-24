@@ -1,0 +1,15 @@
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+]
+
+[bans]
+multiple-versions = "deny"
+skip = [
+    # rustbus v0.19.3 依赖 thiserror 1/syn 1，rustsni 直接用 thiserror 2
+    { name = "thiserror", version = "1" },
+    { name = "thiserror-impl", version = "1" },
+    { name = "syn", version = "1" },
+]
