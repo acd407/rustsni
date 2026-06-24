@@ -22,38 +22,58 @@ fn main() {
         }
     };
 
-    // ── Discover items ────────────────────────────────────────────
-    // The library probes one unique name per poll() call, so discovery
-    // may take many rounds on a busy bus. We poll in a tight loop
-    // until we find the target item or hit a 10-second timeout.
-    let start = Instant::now();
-    let item_id = loop {
-        if let Some(id) = find_item(&host, filter_key, &filter_val) {
-            break id;
-        }
-        let _ = host.poll();
-        if start.elapsed() > Duration::from_secs(10) {
-            eprintln!("error: item not found within 10 seconds");
-            eprintln!("  (searched by {filter_key} = \"{filter_val}\")");
-            eprintln!("  known items:");
-            for (id, item) in host.items() {
-                eprintln!("    {id}  id=\"{}\"  bus=\"{}\"", item.item_id, item.bus_name);
+    // ── Locate the item ───────────────────────────────────────────
+    // When the user provides a D-Bus address we can fetch the item
+    // immediately without waiting for async discovery.
+    let item_id = match filter_key {
+        "address" => {
+            match host.add_item(&filter_val, "/StatusNotifierItem") {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("error: cannot fetch item at {filter_val}: {e}");
+                    std::process::exit(1);
+                }
             }
-            std::process::exit(1);
         }
-        std::thread::sleep(Duration::from_millis(50));
+        "id" => {
+            // We need to know the bus name to fetch directly, so
+            // fall back to async discovery.  The library probes one
+            // unique name per poll() call, so this may take a while
+            // on a busy bus.
+            let start = Instant::now();
+            loop {
+                if let Some(id) = find_item_by_id(&host, &filter_val) {
+                    break id;
+                }
+                let _ = host.poll();
+                if start.elapsed() > Duration::from_secs(10) {
+                    eprintln!("error: item id \"{filter_val}\" not found within 10 s");
+                    eprintln!("  known items:");
+                    for (id, item) in host.items() {
+                        eprintln!("    {id}  id=\"{}\"  bus=\"{}\"",
+                            item.item_id, item.bus_name);
+                    }
+                    std::process::exit(1);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        _ => unreachable!(),
     };
 
     // ── Fetch and print menu ──────────────────────────────────────
     let item = &host.items()[&item_id];
     if !item.has_menu() {
-        println!("item \"{}\" has no menu (menu_path is empty)", item.item_id);
+        println!(
+            "item \"{}\" (at {}) has no menu",
+            item.item_id, item.bus_name,
+        );
         return;
     }
 
     println!(
-        "menu for {} (id=\"{}\", bus={}, path={}):",
-        item_id, item.item_id, item.bus_name, item.menu_path
+        "menu for {} (id=\"{}\", path={}):",
+        item_id, item.item_id, item.menu_path,
     );
 
     match host.get_menu(&item_id, 0) {
@@ -92,20 +112,10 @@ fn parse_args_or_exit() -> (&'static str, String) {
 
 // ── Item lookup ─────────────────────────────────────────────────
 
-fn find_item(host: &TrayHost, key: &str, val: &str) -> Option<ItemId> {
+fn find_item_by_id(host: &TrayHost, target: &str) -> Option<ItemId> {
     for (id, item) in host.items() {
-        match key {
-            "id" => {
-                if item.item_id == val {
-                    return Some(id.clone());
-                }
-            }
-            "address" => {
-                if id.0 == val || item.bus_name == val {
-                    return Some(id.clone());
-                }
-            }
-            _ => unreachable!(),
+        if item.item_id == target {
+            return Some(id.clone());
         }
     }
     None
@@ -116,6 +126,12 @@ fn find_item(host: &TrayHost, key: &str, val: &str) -> Option<ItemId> {
 fn print_nodes(nodes: &[rustsni::MenuNode], indent: usize) {
     for node in nodes {
         let pfx = " ".repeat(indent);
+
+        // Separator: empty leaf items get a divider line.
+        if node.label.is_empty() && node.children.is_empty() {
+            println!("{pfx}──────────────────");
+            continue;
+        }
 
         // Label: grey out disabled items.
         let label = if node.enabled {
@@ -131,14 +147,7 @@ fn print_nodes(nodes: &[rustsni::MenuNode], indent: usize) {
             _ => String::new(),
         };
 
-        // Separator.
-        let line = if node.label.is_empty() && node.children.is_empty() {
-            "─────────────".to_owned()
-        } else {
-            format!("{label}{toggle}")
-        };
-
-        println!("{pfx}{line}");
+        println!("{pfx}{label}{toggle}");
 
         // Recurse into children.
         if !node.children.is_empty() {

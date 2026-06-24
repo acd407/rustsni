@@ -391,6 +391,44 @@ impl TrayHost {
         &self.items
     }
 
+    /// Fetch a tray item by bus name and insert it into the cache.
+    ///
+    /// This is a synchronous, blocking call — it sends `Properties.GetAll` on
+    /// the D-Bus and waits for the reply. Non-reply messages arriving during
+    /// the wait are buffered and processed by the next [`poll()`](Self::poll).
+    ///
+    /// Use this when you already know an item's bus address (e.g. from
+    /// external lookup) and don't want to wait for async discovery to
+    /// reach it.
+    ///
+    /// # Arguments
+    ///
+    /// * `bus_name` — D-Bus bus name (unique like `:1.60` or well-known).
+    /// * `object_path` — object path, typically `/StatusNotifierItem`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MethodCall`] if the target does not implement the
+    /// `org.kde.StatusNotifierItem` interface. Returns [`Error::Bus`] on
+    /// D-Bus I/O errors.
+    pub fn add_item(
+        &mut self,
+        bus_name: &str,
+        object_path: &str,
+    ) -> Result<ItemId> {
+        let service_id = bus_name.to_owned();
+        let item = item::TrayItem::from_bus_get_all(
+            &mut self.conn,
+            &service_id,
+            bus_name,
+            object_path,
+            &mut self.pending_messages,
+        )?;
+        let id = item.id.clone();
+        self.items.insert(id.clone(), item);
+        Ok(id)
+    }
+
     /// Call the item's `Activate` method.
     ///
     /// # Errors
