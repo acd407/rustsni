@@ -288,24 +288,24 @@ impl TrayHost {
                 let msg = self.conn.recv.get_next_message(Timeout::Nonblock)?;
 
                 // Check if this message matches the active probe
-                if let Some((serial, _, _)) = self.probe_serial
-                    && msg.dynheader.response_serial == Some(serial)
-                {
-                    match msg.typ {
-                        MessageType::Reply => {
-                            // Success — it's an SNI item
-                            probe_done = true;
-                            let name = self.probe_serial.take().unwrap().1;
-                            self.process_probe_ok(&name, msg, &mut events);
-                            continue;
+                if let Some((serial, _, _)) = self.probe_serial {
+                    if msg.dynheader.response_serial == Some(serial) {
+                        match msg.typ {
+                            MessageType::Reply => {
+                                // Success — it's an SNI item
+                                probe_done = true;
+                                let name = self.probe_serial.take().unwrap().1;
+                                self.process_probe_ok(&name, msg, &mut events);
+                                continue;
+                            }
+                            MessageType::Error => {
+                                // Error (UnknownInterface) — not an SNI item
+                                probe_done = true;
+                                self.probe_serial.take();
+                                continue;
+                            }
+                            _ => {}
                         }
-                        MessageType::Error => {
-                            // Error (UnknownInterface) — not an SNI item
-                            probe_done = true;
-                            self.probe_serial.take();
-                            continue;
-                        }
-                        _ => {}
                     }
                 }
 
@@ -319,17 +319,18 @@ impl TrayHost {
         // retried on a later poll. After 3 consecutive timeouts the name is
         // discarded — it likely belongs to a non-SNI process that doesn't
         // respond to GetAll.
-        if !probe_done
-            && let Some((_, _, deadline)) = self.probe_serial.as_ref()
-            && *deadline <= std::time::Instant::now()
-        {
-            let name = self.probe_serial.take().unwrap().1;
-            let retries = self.pending_unique_retries.entry(name.clone()).or_insert(0);
-            if *retries < 3 {
-                *retries += 1;
-                self.pending_unique_names.push(name);
-            } else {
-                self.pending_unique_retries.remove(&name);
+        if !probe_done {
+            if let Some((_, _, deadline)) = self.probe_serial.as_ref() {
+                if *deadline <= std::time::Instant::now() {
+                    let name = self.probe_serial.take().unwrap().1;
+                    let retries = self.pending_unique_retries.entry(name.clone()).or_insert(0);
+                    if *retries < 3 {
+                        *retries += 1;
+                        self.pending_unique_names.push(name);
+                    } else {
+                        self.pending_unique_retries.remove(&name);
+                    }
+                }
             }
         }
 

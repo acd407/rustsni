@@ -149,9 +149,7 @@ impl TrayItem {
         // Parse a{sv} dict
         let mut parser = reply.body.parser();
         let mut props: HashMap<String, Param> = HashMap::new();
-        if let Ok(param) = parser.get_param()
-            && let Param::Container(Container::Dict(dict)) = &param
-        {
+        if let Ok(Param::Container(Container::Dict(dict))) = parser.get_param().as_ref() {
             for (key, val) in &dict.map {
                 let key_str = match key {
                     PBase::String(s) => s.clone(),
