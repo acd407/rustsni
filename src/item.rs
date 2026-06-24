@@ -1,4 +1,22 @@
-//! TrayItem data model and property reading.
+//! Tray item data model and D-Bus property reading.
+//!
+//! This module defines [`TrayItem`] — the resolved properties of a
+//! `org.kde.StatusNotifierItem` — and helpers for reading them from the
+//! D-Bus via `org.freedesktop.DBus.Properties.GetAll`.
+//!
+//! A tray item publishes its state through D-Bus properties (category,
+//! title, status, icons, tooltip, menu path, etc.) and accepts interaction
+//! methods (`Activate`, `ContextMenu`, `Scroll`, …). The SNI spec allows
+//! items to be identified three ways:
+//!
+//! - Well-known name: `org.freedesktop.StatusNotifierItem-{pid}-{id}`
+//! - Unique name only: `:1.42`
+//! - Sender + object path: when a path-only registration is received, the
+//!   sender's unique name is used as the bus name.
+//!
+//! See the [SNI spec] for details.
+//!
+//! [SNI spec]: https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/
 
 use rustbus::connection::Timeout;
 use rustbus::connection::ll_conn::DuplexConn;
@@ -6,7 +24,21 @@ use rustbus::connection::ll_conn::DuplexConn;
 use crate::Result;
 use crate::icon::IconPixmap;
 
-/// A tray item's unique identifier — its D-Bus bus name.
+/// A tray item's unique identifier.
+///
+/// The inner string is the `service_id` — either the item's well-known bus
+/// name (e.g. `org.freedesktop.StatusNotifierItem-4077-1`) or, for
+/// path-only registrations, `sender+path` (e.g. `:1.42/StatusNotifierItem`).
+///
+/// The inner field is `pub`, so you can access `id.0` directly for use as
+/// a cache key or display string.
+///
+/// # Constructing
+///
+/// ```rust
+/// use rustsni::ItemId;
+/// let id = ItemId("org.freedesktop.StatusNotifierItem-4077-1".to_owned());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ItemId(pub String);
 
@@ -16,36 +48,74 @@ impl std::fmt::Display for ItemId {
     }
 }
 
-/// Tooltip data: icon name, optional icon pixmap, title, and descriptive text.
+/// Tooltip data for a tray item.
+///
+/// Corresponds to the `(sa(iiay)ss)` signature in the SNI spec:
+/// - Freedesktop-compliant icon name
+/// - Optional icon pixmap (first image from the `a(iiay)` array)
+/// - Title text
+/// - Descriptive text (may contain a subset of HTML markup)
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolTip {
+    /// Freedesktop-compliant icon name.
     pub icon_name: String,
+    /// Optional icon pixmap (first entry from the pixmap array, if any).
     pub icon_pixmap: Option<IconPixmap>,
+    /// Tooltip title.
     pub title: String,
+    /// Descriptive text (may include limited HTML markup).
     pub text: String,
 }
 
 /// Resolved properties of a StatusNotifierItem.
+///
+/// Each field corresponds to a D-Bus property from the
+/// `org.kde.StatusNotifierItem` interface, read at a point in time via
+/// `Properties.GetAll`.
 #[derive(Debug, Clone)]
 pub struct TrayItem {
+    /// Service identifier used internally by the host to track this item.
+    /// For well-known-name registrations this is the bus name; for
+    /// path-only registrations it is `sender+path`.
     pub id: ItemId,
+    /// D-Bus bus name of the item (unique or well-known).
     pub bus_name: String,
+    /// Object path of the item on the bus (typically `/StatusNotifierItem`).
     pub object_path: String,
+    /// Category of this item: `ApplicationStatus`, `Communications`,
+    /// `SystemServices`, or `Hardware`.
     pub category: String,
+    /// Application-specific unique identifier (should be stable across
+    /// sessions, e.g. the application name).
     pub item_id: String,
+    /// Human-readable title describing the application.
     pub title: String,
+    /// Status of the item: `Passive`, `Active`, or `NeedsAttention`.
     pub status: String,
+    /// Windowing-system dependent window identifier (0 if unused).
     pub window_id: i32,
+    /// Additional path to prepend to the icon theme search path.
     pub icon_theme_path: String,
+    /// Freedesktop-compliant icon name (preferred over pixmaps).
     pub icon_name: String,
+    /// Icon pixmap data (array of resolutions, ARGB32 big-endian).
     pub icon_pixmaps: Vec<IconPixmap>,
+    /// Freedesktop-compliant overlay icon name.
     pub attention_icon_name: String,
+    /// Attention icon pixmap data (array of resolutions).
     pub attention_icon_pixmaps: Vec<IconPixmap>,
+    /// Name or path to an animation for the `NeedsAttention` state.
     pub attention_movie_name: String,
+    /// Overlay icon name for extra state information.
     pub overlay_icon_name: String,
+    /// Overlay icon pixmap data (array of resolutions).
     pub overlay_icon_pixmaps: Vec<IconPixmap>,
+    /// If `true`, the item only supports a context menu (prefer
+    /// `ContextMenu()` over `Activate()`).
     pub item_is_menu: bool,
+    /// D-Bus object path of the item's `com.canonical.dbusmenu` menu.
     pub menu_path: String,
+    /// Tooltip data (icon name, optional pixmap, title, description text).
     pub tooltip: ToolTip,
 }
 
@@ -355,7 +425,10 @@ fn parse_pixmap_struct(fields: &[rustbus::params::Param]) -> Option<IconPixmap> 
     IconPixmap::from_argb32be(w, h, &raw)
 }
 
-/// Call a simple (x, y) method on a StatusNotifierItem.
+/// Call a method with two `i32` parameters on a StatusNotifierItem.
+///
+/// Used for `Activate`, `ContextMenu`, and `SecondaryActivate` — all of
+/// which take screen coordinates `(x, y)`.
 pub fn call_method(
     conn: &mut DuplexConn,
     bus_name: &str,
@@ -376,7 +449,9 @@ pub fn call_method(
     Ok(())
 }
 
-/// Call a method with a single string parameter on a StatusNotifierItem.
+/// Call a method taking a single string parameter on a StatusNotifierItem.
+///
+/// Used for `ProvideXdgActivationToken`.
 pub fn call_method_str(
     conn: &mut DuplexConn,
     bus_name: &str,
@@ -395,7 +470,9 @@ pub fn call_method_str(
     Ok(())
 }
 
-/// Call a method with (i32, &str) parameters on a StatusNotifierItem.
+/// Call a method taking `(i32, &str)` on a StatusNotifierItem.
+///
+/// Used for `Scroll(delta, orientation)`.
 pub fn call_method_i32_str(
     conn: &mut DuplexConn,
     bus_name: &str,

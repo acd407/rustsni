@@ -2,10 +2,22 @@
 //!
 //! Icons are transferred as `a(iiay)` — an array of `(width, height, ARGB32_be)`.
 
-/// A decoded icon pixmap in native-endian ARGB32 (Cairo format on LE: `[B,G,R,A]`).
+/// A decoded icon pixmap in native-endian ARGB32.
+///
+/// On little-endian systems (x86, aarch64) the pixel layout is `[B, G, R, A]`,
+/// which is the format expected by Cairo `ImageSurface`. On big-endian
+/// systems the layout is `[A, R, G, B]` (network byte order).
+///
+/// Per the [SNI icon spec], icons are transmitted as an array of resolutions
+/// (`a(iiay)`) so a single item can provide multiple icon sizes. The host
+/// should pick the most appropriate resolution for its display.
+///
+/// [SNI icon spec]: https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/StatusNotifierItem/#icons
 #[derive(Debug, Clone, PartialEq)]
 pub struct IconPixmap {
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
     /// Pixel data in native-endian ARGB32 (ready for Cairo ImageSurface).
     pub data: Vec<u8>,

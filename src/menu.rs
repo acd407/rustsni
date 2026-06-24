@@ -1,4 +1,17 @@
 //! `com.canonical.dbusmenu` support.
+//!
+//! This module implements the client side of the [DBusMenu] protocol, used by
+//! StatusNotifierItem to expose hierarchical menus over D-Bus.
+//!
+//! The key entry points are:
+//! - [`get_layout`] — fetch the full menu tree (recursive `MenuNode`s).
+//! - [`get_group_properties`] / [`get_property`] — read item properties.
+//! - [`event`] / [`fire_click`] — send click/hover events to menu items.
+//!
+//! Menu items are identified by numeric IDs and carry a dictionary of
+//! properties (label, icon, enabled, visible, toggle state, etc.).
+//!
+//! [DBusMenu]: https://wiki.ubuntu.com/DesktopExperienceTeam/ApplicationIndicators
 
 use rustbus::connection::Timeout;
 use rustbus::connection::ll_conn::DuplexConn;
@@ -6,38 +19,68 @@ use rustbus::params::{Base, Container, Param};
 
 use crate::Result;
 
-/// An owned property value from dbusmenu.
+/// An owned property value from the DBusMenu protocol.
+///
+/// Matches the variant types used in DBusMenu property dictionaries.
 #[derive(Debug, Clone)]
 pub enum PropValue {
+    /// A string property (e.g. `"label"`, `"icon-name"`, `"toggle-type"`).
     Str(String),
+    /// A boolean property (e.g. `"enabled"`, `"visible"`).
     Bool(bool),
+    /// An integer property (e.g. `"toggle-state"`, item id).
     Int(i32),
+    /// A byte-array property (e.g. `"icon-data"` as raw PNG).
     Bytes(Vec<u8>),
 }
 
-/// A single item's owned properties returned by `GetGroupProperties`.
+/// Properties for a single menu item as returned by
+/// [`TrayHost::get_menu_group_properties`](crate::TrayHost::get_menu_group_properties).
 #[derive(Debug, Clone)]
 pub struct MenuItemProps {
+    /// Numeric ID of the menu item.
     pub id: i32,
+    /// Key-value property pairs (property name → value).
     pub props: Vec<(String, PropValue)>,
 }
 
-/// A menu node from GetLayout.
+/// A node in the DBusMenu layout tree as returned by
+/// [`TrayHost::get_menu`](crate::TrayHost::get_menu).
+///
+/// Nodes are arranged recursively — each node may have `children` that are
+/// themselves `MenuNode`s, forming the full menu hierarchy.
 #[derive(Debug, Clone)]
 pub struct MenuNode {
+    /// Numeric ID of this menu item.
     pub id: i32,
+    /// Display label (underscores indicate access keys per freedesktop convention).
     pub label: String,
+    /// Whether the item can be activated.
     pub enabled: bool,
+    /// Whether the item is visible in the menu.
     pub visible: bool,
+    /// Freedesktop-compliant icon name.
     pub icon_name: String,
+    /// Raw icon data (typically PNG bytes).
     pub icon_data: Vec<u8>,
+    /// Toggle behaviour: `""` (none), `"checkmark"`, or `"radio"`.
     pub toggle_type: String,
+    /// Toggle state: `0` (off), `1` (on), or `-1` (indeterminate / no toggle).
     pub toggle_state: i32,
+    /// Whether this node has children or has `children-display` set.
     pub is_submenu: bool,
+    /// Child menu items (populated when `is_submenu` is true).
     pub children: Vec<MenuNode>,
 }
 
-/// Call `com.canonical.dbusmenu.GetGroupProperties` and return owned results.
+/// Fetch properties for one or more menu items.
+///
+/// Wraps `com.canonical.dbusmenu.GetGroupProperties`. Returns a vector of
+/// [`MenuItemProps`], one per requested ID. Non-existent IDs are silently
+/// skipped.
+///
+/// If the returned `Vec` is empty, the server either didn't recognise the
+/// IDs or returned no data.
 pub fn get_group_properties(
     conn: &mut DuplexConn,
     bus_name: &str,
@@ -101,7 +144,13 @@ pub fn get_group_properties(
     Ok(result)
 }
 
-/// Call `com.canonical.dbusmenu.GetProperty` and return the owned value.
+/// Fetch a single menu item property.
+///
+/// Wraps `com.canonical.dbusmenu.GetProperty`. This is mainly useful for
+/// debugging — for bulk access prefer [`get_group_properties`].
+///
+/// Returns `None` if the property doesn't exist or the server returned an
+/// error reply.
 pub fn get_property(
     conn: &mut DuplexConn,
     bus_name: &str,
@@ -141,7 +190,18 @@ pub fn get_property(
     Ok(extract_prop_value(&param))
 }
 
-/// Call `GetLayout(parent_id, 1, &[])` and parse the children.
+/// Fetch the menu layout tree starting from `parent_id`.
+///
+/// Wraps `com.canonical.dbusmenu.GetLayout` with `recursion_depth = -1`
+/// (unlimited) and requests all properties.
+///
+/// Returns the root-level menu items as a `Vec<MenuNode>`. Each node may
+/// contain children, forming a recursive tree.
+///
+/// # Arguments
+///
+/// * `parent_id` — fetch children of this item. Pass `0` to get the root
+///   layout. Pass an item's ID to get its submenu.
 pub fn get_layout(
     conn: &mut DuplexConn,
     bus_name: &str,
@@ -199,10 +259,13 @@ pub fn get_layout(
     Ok(children.iter().filter_map(parse_menu_node).collect())
 }
 
-/// Fire a menu click event via a fresh D-Bus connection.
+/// Fire a click event on a menu item using a standalone D-Bus connection.
 ///
-/// Useful when you only have `bus_name`/`menu_path` and no `TrayHost`
-/// (e.g. from a background thread).
+/// This creates a fresh D-Bus connection, so it works without a [`TrayHost`].
+/// Useful from background threads or when you only have the item's bus name
+/// and menu path.
+///
+/// [`TrayHost`]: crate::TrayHost
 pub fn fire_click(bus_name: &str, menu_path: &str, menu_id: i32) -> Result<()> {
     let mut conn = rustbus::connection::ll_conn::DuplexConn::connect_to_bus(
         rustbus::get_session_bus_path()?,
@@ -212,7 +275,16 @@ pub fn fire_click(bus_name: &str, menu_path: &str, menu_id: i32) -> Result<()> {
     event(&mut conn, bus_name, menu_path, menu_id, "clicked")
 }
 
-/// Fire an event on a menu item.
+/// Send an event notification to a menu item.
+///
+/// Wraps `com.canonical.dbusmenu.Event`. Common event types:
+/// - `"clicked"` — the item was clicked
+/// - `"hovered"` — the item was hovered
+///
+/// Vendor-specific events can be prefixed with `"x-<vendor>-"`.
+///
+/// Many servers don't reply to `Event` calls. This function waits at most
+/// 100 ms for a reply, treating timeout as success.
 pub fn event(
     conn: &mut DuplexConn,
     bus_name: &str,

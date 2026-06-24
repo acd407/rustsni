@@ -1,6 +1,21 @@
 //! StatusNotifierWatcher implementation.
 //!
-//! Registers on the session bus and handles item registration/deregistration.
+//! This module implements the `org.kde.StatusNotifierWatcher` D-Bus interface.
+//! The watcher is the central registry on the session bus:
+//!
+//! - Tray items call `RegisterStatusNotifierItem` to announce themselves.
+//! - The host calls `RegisterStatusNotifierHost` to announce itself.
+//! - The watcher emits `StatusNotifierItemRegistered` /
+//!   `StatusNotifierItemUnregistered` signals so the host knows when to
+//!   update its tray representation.
+//!
+//! The watcher also probes already-running D-Bus services at startup
+//! (via `org.freedesktop.DBus.ListNames`) to catch items that started
+//! before the host.
+//!
+//! Additionally it subscribes to:
+//! - `NameOwnerChanged` to detect items vanishing from the bus.
+//! - `com.canonical.dbusmenu` signals for menu layout updates.
 
 use std::collections::HashMap;
 
