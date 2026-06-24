@@ -84,7 +84,15 @@ pub fn register(conn: &mut DuplexConn) -> Result<()> {
             let resp = conn.recv.get_next_message(Timeout::Infinite)?;
             if resp.dynheader.response_serial == Some(serial) {
                 match resp.typ {
-                    rustbus::message_builder::MessageType::Reply => break,
+                    rustbus::message_builder::MessageType::Reply => {
+                        // Check the reply body: 1 = PRIMARY_OWNER, 4 = ALREADY_OWNER.
+                        // 2 = IN_QUEUE and 3 = EXISTS mean another watcher is active.
+                        let result: u32 = resp.body.parser().get().unwrap_or(0);
+                        if result != 1 && result != 4 {
+                            return Err(crate::Error::WatcherAlreadyRunning);
+                        }
+                        break;
+                    }
                     _ => return Err(crate::Error::WatcherAlreadyRunning),
                 }
             }
@@ -320,16 +328,29 @@ pub fn handle_signal(
     items: &mut HashMap<ItemId, TrayItem>,
     events: &mut Vec<TrayEvent>,
     pending: &mut std::collections::VecDeque<rustbus::message_builder::MarshalledMessage>,
+    // Names to probe asynchronously — new unique names are appended
+    // here so they get probed in future poll() calls.
+    pending_unique_names: &mut Vec<String>,
 ) -> Result<()> {
     let iface = msg.dynheader.interface.as_deref().unwrap_or("");
     let member = msg.dynheader.member.as_deref().unwrap_or("");
     if iface == "org.freedesktop.DBus" && member == "NameOwnerChanged" {
         let mut parser = msg.body.parser();
         let name: String = parser.get()?;
-        let _old_owner: String = parser.get()?;
+        let old_owner: String = parser.get()?;
         let new_owner: String = parser.get()?;
 
-        // Find items whose bus_name matches the gone name
+        // ── New unique name appeared on the bus ─────────────────
+        // A new process connected.  Probe its unique name ASAP
+        // (front of the queue) instead of waiting for hundreds of
+        // existing names to be processed first.
+        if old_owner.is_empty() && !new_owner.is_empty() && name.starts_with(":1.") {
+            if !pending_unique_names.contains(&name) {
+                pending_unique_names.insert(0, name.clone());
+            }
+        }
+
+        // ── Name disappeared from the bus ───────────────────────
         if new_owner.is_empty() {
             let ids_to_remove: Vec<ItemId> = items
                 .values()
