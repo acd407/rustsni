@@ -1,16 +1,14 @@
 /// A minimal StatusNotifierItem watcher.
 ///
-/// Starts a TrayHost, discovers tray items, prints their properties,
-/// then interacts with the first one and exits.
-///
-/// Uses [`TrayHost::scan_blocking`] for fast initial discovery — probes
-/// all D-Bus unique names synchronously (hundreds of names in under a
-/// second on a typical system).
+/// Starts a TrayHost, registers `fd()` with an event loop, and prints
+/// tray events as they arrive.  Run it and observe items appearing,
+/// changing, and disappearing on your session bus.
 ///
 /// Usage:
 ///   cargo run --example simple_watcher
 
-use rustsni::{ItemId, TrayHost};
+use rustsni::{ItemId, TrayEvent, TrayHost};
+use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 fn main() {
@@ -18,78 +16,64 @@ fn main() {
         Ok(h) => h,
         Err(e) => {
             eprintln!("error: failed to start tray watcher: {e}");
-            eprintln!("  (is a D-Bus session bus running?)");
             std::process::exit(1);
         }
     };
 
-    // ── Fast scan ─────────────────────────────────────────────────
-    // Scan all pending unique names synchronously (batch probe).
-    // With a 1-second overall timeout this finishes in ~100 ms on
-    // a typical system because non-SNI services reply instantly with
-    // an error.
-    let found = match host.scan_blocking(1000) {
-        Ok(ids) => ids,
-        Err(e) => {
-            eprintln!("scan error: {e}");
-            Vec::new()
-        }
-    };
+    println!("tray host started (fd={})", host.fd().as_raw_fd());
 
-    // Continue polling for items that may register after our scan
-    // (e.g. lazy-starting applications).  Give them a short window.
-    if found.is_empty() {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while std::time::Instant::now() < deadline {
-            if let Ok(events) = host.poll() {
+    // In a real application you would register host.fd() with your
+    // poll/epoll loop.  Here we simply poll every 200 ms for a few
+    // rounds.
+    for round in 0..25 {
+        match host.poll() {
+            Ok(events) => {
                 for ev in &events {
-                    if matches!(ev, rustsni::TrayEvent::ItemAdded(_)) {
-                        // found via async registration
+                    match ev {
+                        TrayEvent::ItemAdded(id) => {
+                            if let Some(item) = host.items().get(id) {
+                                println!("[{round}]  + {id}  \"{}\"  [{}]{}",
+                                    item.title, item.status,
+                                    if item.has_menu() { "  ☰" } else { "" },
+                                );
+                            }
+                        }
+                        TrayEvent::ItemChanged(id) => {
+                            if let Some(item) = host.items().get(id) {
+                                println!("[{round}]  ~ {id}  \"{}\"  [{}]", item.title, item.status);
+                            }
+                        }
+                        TrayEvent::ItemRemoved(id) => {
+                            println!("[{round}]  - {id}");
+                        }
+                        TrayEvent::MenuChanged(id) => {
+                            println!("[{round}]  ☰ {id} menu changed");
+                        }
+                        TrayEvent::MenuActivationRequested(id) => {
+                            println!("[{round}]  ☰ {id} menu activation requested");
+                        }
+                        TrayEvent::HostShutdown => {
+                            println!("[{round}]  ⏹ host shutdown");
+                            return;
+                        }
                     }
                 }
-                if !host.items().is_empty() {
-                    break;
-                }
             }
-            std::thread::sleep(Duration::from_millis(50));
+            Err(e) => {
+                eprintln!("[{round}] poll error: {e}");
+            }
         }
+        std::thread::sleep(Duration::from_millis(200));
     }
 
-    // ── Print items ───────────────────────────────────────────────
-    let items = host.items();
-    if items.is_empty() {
-        println!("no tray items found.");
-        return;
-    }
-
-    println!("found {} tray item(s):", items.len());
-    for (id, item) in items {
-        print!("  {id:<55}");
-        if let Some(best) = item.best_icon_pixmap() {
-            print!(" icon={}x{}", best.width, best.height);
-        } else if !item.icon_name.is_empty() {
-            print!(" icon=\"{}\"", item.icon_name);
-        }
-        if !item.title.is_empty() {
-            print!("  \"{}\"", item.title);
-        }
-        print!("  [{}]", item.status);
-        if item.has_menu() {
-            print!("  ☰");
-        }
-        println!();
-    }
-
-    // ── Interact with first item ──────────────────────────────────
-    let first: Vec<(ItemId, String)> = host
+    // ── Interact with the first discovered item ───────────────────
+    let first: Option<(ItemId, String)> = host
         .items()
         .iter()
-        .take(1)
         .map(|(id, item)| (id.clone(), item.menu_path.clone()))
-        .collect();
-
-    if let Some((id, menu_path)) = first.into_iter().next() {
-        println!("\nactivating: {id}");
+        .next();
+    if let Some((id, menu_path)) = first {
+        println!("\nactivating first item: {id}");
         let _ = host.activate(&id, 0, 0);
         if !menu_path.is_empty() && menu_path != "/" {
             if let Ok(nodes) = host.get_menu(&id, 0) {
@@ -99,7 +83,6 @@ fn main() {
         }
     }
 
-    // ── Shutdown ──────────────────────────────────────────────────
     let _ = host.shutdown();
     println!("done");
 }
