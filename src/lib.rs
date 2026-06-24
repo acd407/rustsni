@@ -1,4 +1,5 @@
 //! A poll-friendly StatusNotifierItem host library built on rustbus.
+#![allow(clippy::mutable_key_type)]
 
 mod host;
 mod icon;
@@ -9,10 +10,10 @@ mod watcher;
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, RawFd};
 
-use rustbus::connection::ll_conn::DuplexConn;
 use rustbus::connection::Timeout;
+use rustbus::connection::ll_conn::DuplexConn;
 
-pub use icon::{from_tuples, IconPixmap};
+pub use icon::{IconPixmap, from_tuples};
 pub use item::{ItemId, ToolTip, TrayItem};
 pub use menu::{MenuItemProps, MenuNode, PropValue, fire_click as fire_menu_click};
 
@@ -53,7 +54,7 @@ pub struct TrayHost {
     /// Retry count per unique name (discard after 3 consecutive timeouts).
     pending_unique_retries: HashMap<String, u32>,
     /// Serial of an in-flight GetAll probe, if any.
-    probe_serial: Option<(std::num::NonZeroU32, String, std::time::Instant)>,
+    probe_serial: Option<(u32, String, std::time::Instant)>,
     /// Messages buffered during synchronous property reads.
     pending_messages: VecDeque<rustbus::message_builder::MarshalledMessage>,
 }
@@ -63,10 +64,7 @@ impl TrayHost {
     /// StatusNotifierHost. Returns `Err(WatcherAlreadyRunning)` if another
     /// watcher is already active.
     pub fn new() -> Result<Self> {
-        let mut conn = DuplexConn::connect_to_bus(
-            rustbus::get_session_bus_path()?,
-            true,
-        )?;
+        let mut conn = DuplexConn::connect_to_bus(rustbus::get_session_bus_path()?, true)?;
         conn.send_hello(Timeout::Infinite)?;
 
         let mut this = Self {
@@ -86,7 +84,6 @@ impl TrayHost {
         match watcher::discover_existing_items(&mut this.conn, &mut this.pending_messages) {
             Ok(pending) => {
                 this.pending_unique_names = pending;
-
             }
             Err(_e) => {}
         }
@@ -131,24 +128,24 @@ impl TrayHost {
             let msg = self.conn.recv.get_next_message(Timeout::Nonblock)?;
 
             // Check if this message matches the active probe
-            if let Some((serial, _, _)) = self.probe_serial {
-                if msg.dynheader.response_serial == Some(serial) {
-                    match msg.typ {
-                        MessageType::Reply => {
-                            // Success — it's an SNI item
-                            probe_done = true;
-                            let name = self.probe_serial.take().unwrap().1;
-                            self.process_probe_ok(&name, msg, &mut events);
-                            continue;
-                        }
-                        MessageType::Error => {
-                            // Error (UnknownInterface) — not an SNI item
-                            probe_done = true;
-                            self.probe_serial.take();
-                            continue;
-                        }
-                        _ => {}
+            if let Some((serial, _, _)) = self.probe_serial
+                && msg.dynheader.response_serial == Some(serial)
+            {
+                match msg.typ {
+                    MessageType::Reply => {
+                        // Success — it's an SNI item
+                        probe_done = true;
+                        let name = self.probe_serial.take().unwrap().1;
+                        self.process_probe_ok(&name, msg, &mut events);
+                        continue;
                     }
+                    MessageType::Error => {
+                        // Error (UnknownInterface) — not an SNI item
+                        probe_done = true;
+                        self.probe_serial.take();
+                        continue;
+                    }
+                    _ => {}
                 }
             }
 
@@ -161,18 +158,17 @@ impl TrayHost {
         // retried on a later poll. After 3 consecutive timeouts the name is
         // discarded — it likely belongs to a non-SNI process that doesn't
         // respond to GetAll.
-        if !probe_done {
-            if let Some((_, _, deadline)) = self.probe_serial.as_ref() {
-                if *deadline <= std::time::Instant::now() {
-                    let name = self.probe_serial.take().unwrap().1;
-                    let retries = self.pending_unique_retries.entry(name.clone()).or_insert(0);
-                    if *retries < 3 {
-                        *retries += 1;
-                        self.pending_unique_names.push(name);
-                    } else {
-                        self.pending_unique_retries.remove(&name);
-                    }
-                }
+        if !probe_done
+            && let Some((_, _, deadline)) = self.probe_serial.as_ref()
+            && *deadline <= std::time::Instant::now()
+        {
+            let name = self.probe_serial.take().unwrap().1;
+            let retries = self.pending_unique_retries.entry(name.clone()).or_insert(0);
+            if *retries < 3 {
+                *retries += 1;
+                self.pending_unique_names.push(name);
+            } else {
+                self.pending_unique_retries.remove(&name);
             }
         }
 
@@ -181,8 +177,8 @@ impl TrayHost {
             let name = self.pending_unique_names.remove(0);
             match item::TrayItem::send_get_all(&mut self.conn, &name, "/StatusNotifierItem") {
                 Ok(serial) => {
-                    let deadline = std::time::Instant::now()
-                        + std::time::Duration::from_millis(500);
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(500);
                     self.probe_serial = Some((serial, name, deadline));
                 }
                 Err(_) => {
@@ -201,25 +197,32 @@ impl TrayHost {
         reply: rustbus::message_builder::MarshalledMessage,
         events: &mut Vec<TrayEvent>,
     ) {
-        match item::TrayItem::from_get_all_reply(&reply, name, name, "/StatusNotifierItem") {
-            Ok(item) => {
-                // Deduplicate: skip if this item's `Id` already registered
-                if self.items.values().any(|e| !e.item_id.is_empty() && e.item_id == item.item_id) {
-                    return;
-                }
-
-                let id = item.id.clone();
-                self.items.insert(id.clone(), item);
-
-                let mut sig = rustbus::MessageBuilder::new()
-                    .signal(crate::watcher::WATCHER_INTERFACE, "StatusNotifierItemRegistered", crate::watcher::WATCHER_PATH)
-                    .build();
-                sig.body.push_param(name).unwrap();
-                let _ = self.conn.send.send_message_write_all(&sig);
-
-                events.push(TrayEvent::ItemAdded(id));
+        if let Ok(item) =
+            item::TrayItem::from_get_all_reply(&reply, name, name, "/StatusNotifierItem")
+        {
+            // Deduplicate: skip if this item's `Id` already registered
+            if self
+                .items
+                .values()
+                .any(|e| !e.item_id.is_empty() && e.item_id == item.item_id)
+            {
+                return;
             }
-            Err(_) => {}
+
+            let id = item.id.clone();
+            self.items.insert(id.clone(), item);
+
+            let mut sig = rustbus::MessageBuilder::new()
+                .signal(
+                    crate::watcher::WATCHER_INTERFACE,
+                    "StatusNotifierItemRegistered",
+                    crate::watcher::WATCHER_PATH,
+                )
+                .build();
+            sig.body.push_param(name).unwrap();
+            let _ = self.conn.send.send_message_write_all(&sig);
+
+            events.push(TrayEvent::ItemAdded(id));
         }
     }
 
@@ -230,20 +233,50 @@ impl TrayHost {
 
     /// Call the item's `Activate` method.
     pub fn activate(&mut self, id: &ItemId, x: i32, y: i32) -> Result<()> {
-        let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
-        item::call_method(&mut self.conn, &item.bus_name, &item.object_path, "Activate", x, y)
+        let item = self
+            .items
+            .get(id)
+            .ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
+        item::call_method(
+            &mut self.conn,
+            &item.bus_name,
+            &item.object_path,
+            "Activate",
+            x,
+            y,
+        )
     }
 
     /// Call the item's `ContextMenu` method.
     pub fn context_menu(&mut self, id: &ItemId, x: i32, y: i32) -> Result<()> {
-        let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
-        item::call_method(&mut self.conn, &item.bus_name, &item.object_path, "ContextMenu", x, y)
+        let item = self
+            .items
+            .get(id)
+            .ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
+        item::call_method(
+            &mut self.conn,
+            &item.bus_name,
+            &item.object_path,
+            "ContextMenu",
+            x,
+            y,
+        )
     }
 
     /// Call the item's `SecondaryActivate` method.
     pub fn secondary_activate(&mut self, id: &ItemId, x: i32, y: i32) -> Result<()> {
-        let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
-        item::call_method(&mut self.conn, &item.bus_name, &item.object_path, "SecondaryActivate", x, y)
+        let item = self
+            .items
+            .get(id)
+            .ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
+        item::call_method(
+            &mut self.conn,
+            &item.bus_name,
+            &item.object_path,
+            "SecondaryActivate",
+            x,
+            y,
+        )
     }
 
     /// Get the menu layout for a tray item.
@@ -267,19 +300,44 @@ impl TrayHost {
         if item.menu_path.is_empty() || item.menu_path == "/" {
             return Ok(());
         }
-        menu::event(&mut self.conn, &item.bus_name, &item.menu_path, menu_id, "clicked")
+        menu::event(
+            &mut self.conn,
+            &item.bus_name,
+            &item.menu_path,
+            menu_id,
+            "clicked",
+        )
     }
 
     /// Call the item's `Scroll` method.
     pub fn scroll(&mut self, id: &ItemId, delta: i32, orientation: &str) -> Result<()> {
-        let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
-        item::call_method_i32_str(&mut self.conn, &item.bus_name, &item.object_path, "Scroll", delta, orientation)
+        let item = self
+            .items
+            .get(id)
+            .ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
+        item::call_method_i32_str(
+            &mut self.conn,
+            &item.bus_name,
+            &item.object_path,
+            "Scroll",
+            delta,
+            orientation,
+        )
     }
 
     /// Call the item's `ProvideXdgActivationToken` method.
     pub fn provide_xdg_activation_token(&mut self, id: &ItemId, token: &str) -> Result<()> {
-        let item = self.items.get(id).ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
-        item::call_method_str(&mut self.conn, &item.bus_name, &item.object_path, "ProvideXdgActivationToken", token)
+        let item = self
+            .items
+            .get(id)
+            .ok_or_else(|| crate::Error::ItemNotFound(id.clone()))?;
+        item::call_method_str(
+            &mut self.conn,
+            &item.bus_name,
+            &item.object_path,
+            "ProvideXdgActivationToken",
+            token,
+        )
     }
 
     /// Get properties for multiple menu items at once via `GetGroupProperties`.
@@ -296,7 +354,13 @@ impl TrayHost {
         if item.menu_path.is_empty() || item.menu_path == "/" {
             return Ok(Vec::new());
         }
-        menu::get_group_properties(&mut self.conn, &item.bus_name, &item.menu_path, ids, property_names)
+        menu::get_group_properties(
+            &mut self.conn,
+            &item.bus_name,
+            &item.menu_path,
+            ids,
+            property_names,
+        )
     }
 
     /// Get a single property from a menu item via `GetProperty`.
@@ -313,7 +377,13 @@ impl TrayHost {
         if item.menu_path.is_empty() || item.menu_path == "/" {
             return Ok(None);
         }
-        menu::get_property(&mut self.conn, &item.bus_name, &item.menu_path, menu_id, name)
+        menu::get_property(
+            &mut self.conn,
+            &item.bus_name,
+            &item.menu_path,
+            menu_id,
+            name,
+        )
     }
 
     /// Emit `StatusNotifierHostUnregistered` and push `HostShutdown`.
@@ -339,11 +409,23 @@ impl TrayHost {
 
         match msg.typ {
             MessageType::Signal => {
-                watcher::handle_signal(&mut self.conn, &msg, &mut self.items, events, &mut self.pending_messages)?;
+                watcher::handle_signal(
+                    &mut self.conn,
+                    &msg,
+                    &mut self.items,
+                    events,
+                    &mut self.pending_messages,
+                )?;
             }
             MessageType::Call => {
                 // Handle all incoming method calls (watcher, properties, etc.)
-                watcher::handle_call(&mut self.conn, &msg, &mut self.items, events, &mut self.pending_messages)?;
+                watcher::handle_call(
+                    &mut self.conn,
+                    &msg,
+                    &mut self.items,
+                    events,
+                    &mut self.pending_messages,
+                )?;
             }
             _ => {}
         }

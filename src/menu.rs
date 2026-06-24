@@ -1,7 +1,7 @@
 //! `com.canonical.dbusmenu` support.
 
-use rustbus::connection::ll_conn::DuplexConn;
 use rustbus::connection::Timeout;
+use rustbus::connection::ll_conn::DuplexConn;
 use rustbus::params::{Base, Container, Param};
 
 use crate::Result;
@@ -235,7 +235,10 @@ pub fn event(
     let serial = conn.send.send_message_write_all(&call)?;
     // Wait briefly for a reply; ignore timeout (many servers don't reply to Event)
     loop {
-        match conn.recv.get_next_message(Timeout::Duration(std::time::Duration::from_millis(100))) {
+        match conn
+            .recv
+            .get_next_message(Timeout::Duration(std::time::Duration::from_millis(100)))
+        {
             Ok(resp) => {
                 if resp.typ == rustbus::message_builder::MessageType::Reply
                     && resp.dynheader.response_serial == Some(serial)
@@ -288,12 +291,10 @@ fn parse_menu_node(param: &Param) -> Option<MenuNode> {
     let icon_data = get_bytes_prop(props, "icon-data");
     let toggle_type = get_str_prop(props, "toggle-type");
     let toggle_state = get_int_prop(props, "toggle-state").unwrap_or(-1);
-    let is_submenu = props.iter().any(|(k, _)| {
-        match k {
-            Base::StringRef(s) => *s == "children-display",
-            Base::String(s) => s == "children-display",
-            _ => false,
-        }
+    let is_submenu = props.iter().any(|(k, _)| match k {
+        Base::StringRef(s) => *s == "children-display",
+        Base::String(s) => s == "children-display",
+        _ => false,
     });
 
     let children_param = match &fields[2] {
@@ -358,11 +359,17 @@ fn get_int_prop(props: &rustbus::params::DictMap, key: &str) -> Option<i32> {
 
 fn get_bytes_prop(props: &rustbus::params::DictMap, key: &str) -> Vec<u8> {
     match get_variant(props, key) {
-        Some(Param::Container(Container::Array(arr))) => {
-            arr.values.iter().filter_map(|b| {
-                if let Param::Base(Base::Byte(v)) = b { Some(*v) } else { None }
-            }).collect()
-        }
+        Some(Param::Container(Container::Array(arr))) => arr
+            .values
+            .iter()
+            .filter_map(|b| {
+                if let Param::Base(Base::Byte(v)) = b {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -396,9 +403,17 @@ fn extract_prop_value(param: &Param) -> Option<PropValue> {
         Param::Base(Base::Int32(n)) => Some(PropValue::Int(*n)),
         Param::Base(Base::Byte(b)) => Some(PropValue::Bytes(vec![*b])),
         Param::Container(Container::Array(arr)) => {
-            let bytes: Vec<u8> = arr.values.iter().filter_map(|e| {
-                if let Param::Base(Base::Byte(b)) = e { Some(*b) } else { None }
-            }).collect();
+            let bytes: Vec<u8> = arr
+                .values
+                .iter()
+                .filter_map(|e| {
+                    if let Param::Base(Base::Byte(b)) = e {
+                        Some(*b)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             if bytes.len() == arr.values.len() {
                 Some(PropValue::Bytes(bytes))
             } else {
@@ -485,8 +500,14 @@ mod tests {
         props.insert(Base::String("label".to_owned()), make_variant_str("Test"));
         props.insert(Base::String("enabled".to_owned()), make_variant_bool(true));
         props.insert(Base::String("visible".to_owned()), make_variant_bool(true));
-        props.insert(Base::String("icon-name".to_owned()), make_variant_str("icon"));
-        props.insert(Base::String("toggle-type".to_owned()), make_variant_str("checkmark"));
+        props.insert(
+            Base::String("icon-name".to_owned()),
+            make_variant_str("icon"),
+        );
+        props.insert(
+            Base::String("toggle-type".to_owned()),
+            make_variant_str("checkmark"),
+        );
         props.insert(Base::String("toggle-state".to_owned()), make_variant_i32(1));
         let children_arr = Param::Container(Container::Array(rustbus::params::Array {
             element_sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
@@ -496,7 +517,9 @@ mod tests {
             Param::Base(Base::Int32(42)),
             Param::Container(Container::Dict(rustbus::params::Dict {
                 key_sig: rustbus::signature::Base::String,
-                value_sig: rustbus::signature::Type::Container(rustbus::signature::Container::Variant),
+                value_sig: rustbus::signature::Type::Container(
+                    rustbus::signature::Container::Variant,
+                ),
                 map: props,
             })),
             children_arr,
@@ -555,10 +578,7 @@ mod tests {
     fn extract_prop_value_bytes_variant() {
         let bytes_param = Param::Container(Container::Array(rustbus::params::Array {
             element_sig: rustbus::signature::Type::Base(rustbus::signature::Base::Byte),
-            values: vec![
-                Param::Base(Base::Byte(0xAA)),
-                Param::Base(Base::Byte(0xBB)),
-            ],
+            values: vec![Param::Base(Base::Byte(0xAA)), Param::Base(Base::Byte(0xBB))],
         }));
         let p = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
             sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),

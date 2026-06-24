@@ -1,10 +1,10 @@
 //! TrayItem data model and property reading.
 
-use rustbus::connection::ll_conn::DuplexConn;
 use rustbus::connection::Timeout;
+use rustbus::connection::ll_conn::DuplexConn;
 
-use crate::icon::IconPixmap;
 use crate::Result;
+use crate::icon::IconPixmap;
 
 /// A tray item's unique identifier — its D-Bus bus name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -53,11 +53,7 @@ const SNI_IFACE: &str = "org.kde.StatusNotifierItem";
 
 impl TrayItem {
     /// Send a `Properties.GetAll` call. Returns the serial number for matching the reply.
-    pub fn send_get_all(
-        conn: &mut DuplexConn,
-        bus_name: &str,
-        object_path: &str,
-    ) -> Result<std::num::NonZeroU32> {
+    pub fn send_get_all(conn: &mut DuplexConn, bus_name: &str, object_path: &str) -> Result<u32> {
         let mut call = rustbus::MessageBuilder::new()
             .call("GetAll")
             .on(object_path)
@@ -83,16 +79,16 @@ impl TrayItem {
         // Parse a{sv} dict
         let mut parser = reply.body.parser();
         let mut props: HashMap<String, Param> = HashMap::new();
-        if let Ok(param) = parser.get_param() {
-            if let Param::Container(Container::Dict(dict)) = &param {
-                for (key, val) in &dict.map {
-                    let key_str = match key {
-                        PBase::String(s) => s.clone(),
-                        PBase::StringRef(s) => s.to_string(),
-                        _ => continue,
-                    };
-                    props.insert(key_str, val.clone());
-                }
+        if let Ok(param) = parser.get_param()
+            && let Param::Container(Container::Dict(dict)) = &param
+        {
+            for (key, val) in &dict.map {
+                let key_str = match key {
+                    PBase::String(s) => s.clone(),
+                    PBase::StringRef(s) => s.to_string(),
+                    _ => continue,
+                };
+                props.insert(key_str, val.clone());
             }
         }
 
@@ -223,12 +219,16 @@ impl TrayItem {
 
     /// Select the largest overlay icon pixmap by pixel count.
     pub fn best_overlay_icon_pixmap(&self) -> Option<&IconPixmap> {
-        self.overlay_icon_pixmaps.iter().max_by_key(|p| p.width * p.height)
+        self.overlay_icon_pixmaps
+            .iter()
+            .max_by_key(|p| p.width * p.height)
     }
 
     /// Select the largest attention icon pixmap by pixel count.
     pub fn best_attention_icon_pixmap(&self) -> Option<&IconPixmap> {
-        self.attention_icon_pixmaps.iter().max_by_key(|p| p.width * p.height)
+        self.attention_icon_pixmaps
+            .iter()
+            .max_by_key(|p| p.width * p.height)
     }
 
     /// Icon search paths for theme lookup: `[icon_theme_path, "/usr/share/pixmaps"]`.
@@ -267,15 +267,13 @@ fn extract_tooltip_from_param(param: &rustbus::params::Param) -> ToolTip {
 
     // icon pixmap: a(iiay) — take the first image if present
     let icon_pixmap = match &fields[1] {
-        Param::Container(Container::Array(arr)) => {
-            arr.values.first().and_then(|elem| {
-                if let Param::Container(Container::Struct(s)) = elem {
-                    parse_pixmap_struct(s)
-                } else {
-                    None
-                }
-            })
-        }
+        Param::Container(Container::Array(arr)) => arr.values.first().and_then(|elem| {
+            if let Param::Container(Container::Struct(s)) = elem {
+                parse_pixmap_struct(s)
+            } else {
+                None
+            }
+        }),
         _ => None,
     };
 
@@ -291,7 +289,12 @@ fn extract_tooltip_from_param(param: &rustbus::params::Param) -> ToolTip {
         _ => String::new(),
     };
 
-    ToolTip { icon_name, icon_pixmap, title, text }
+    ToolTip {
+        icon_name,
+        icon_pixmap,
+        title,
+        text,
+    }
 }
 
 /// Extract IconPixmaps from a Param value (variant containing a(iiay)).
@@ -308,13 +311,16 @@ fn extract_pixmaps_from_param(param: &rustbus::params::Param) -> Vec<IconPixmap>
         _ => return Vec::new(),
     };
 
-    array.iter().filter_map(|elem| {
-        if let Param::Container(Container::Struct(s)) = elem {
-            parse_pixmap_struct(s)
-        } else {
-            None
-        }
-    }).collect()
+    array
+        .iter()
+        .filter_map(|elem| {
+            if let Param::Container(Container::Struct(s)) = elem {
+                parse_pixmap_struct(s)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Parse a single `(i32, i32, ay)` struct into an IconPixmap.
@@ -333,9 +339,17 @@ fn parse_pixmap_struct(fields: &[rustbus::params::Param]) -> Option<IconPixmap> 
         _ => return None,
     };
     let raw: Vec<u8> = match &fields[2] {
-        Param::Container(Container::Array(a)) => a.values.iter().filter_map(|b| {
-            if let Param::Base(rustbus::params::Base::Byte(v)) = b { Some(*v) } else { None }
-        }).collect(),
+        Param::Container(Container::Array(a)) => a
+            .values
+            .iter()
+            .filter_map(|b| {
+                if let Param::Base(rustbus::params::Base::Byte(v)) = b {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
+            .collect(),
         _ => return None,
     };
     IconPixmap::from_argb32be(w, h, &raw)
@@ -410,13 +424,16 @@ mod tests {
     /// Helper: create a signature::Type for a(iiay) — array of (i32,i32,ay).
     fn sig_icon_array() -> rustbus::signature::Type {
         use rustbus::signature::{Base as SBase, Container as SContainer, StructTypes, Type};
-        Type::Container(SContainer::Array(Box::new(Type::Container(SContainer::Struct(
-            StructTypes::new(vec![
-                Type::Base(SBase::Int32),
-                Type::Base(SBase::Int32),
-                Type::Container(SContainer::Array(Box::new(Type::Base(SBase::Byte)))),
-            ]).unwrap(),
-        )))))
+        Type::Container(SContainer::Array(Box::new(Type::Container(
+            SContainer::Struct(
+                StructTypes::new(vec![
+                    Type::Base(SBase::Int32),
+                    Type::Base(SBase::Int32),
+                    Type::Container(SContainer::Array(Box::new(Type::Base(SBase::Byte)))),
+                ])
+                .unwrap(),
+            ),
+        ))))
     }
 
     /// Build a Param tree for `(sa(iiay)ss)` and parse it as a ToolTip.
@@ -445,18 +462,15 @@ mod tests {
         let title: Param = Param::Base(PBase::StringRef("Title Text"));
         let text: Param = Param::Base(PBase::StringRef("Description"));
 
-        let tooltip_struct: Param = Param::Container(Container::Struct(vec![
-            icon_name,
-            pixmaps,
-            title,
-            text,
-        ]));
+        let tooltip_struct: Param =
+            Param::Container(Container::Struct(vec![icon_name, pixmaps, title, text]));
 
         // Wrap in variant (as Properties.Get returns)
-        let variant: Param = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
-            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
-            value: tooltip_struct,
-        })));
+        let variant: Param =
+            Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+                sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+                value: tooltip_struct,
+            })));
 
         let tooltip = extract_tooltip_from_param(&variant);
         assert_eq!(tooltip.icon_name, "my-icon");
@@ -479,12 +493,11 @@ mod tests {
         let title: Param = Param::Base(PBase::StringRef("T"));
         let text: Param = Param::Base(PBase::StringRef(""));
 
-        let variant: Param = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
-            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
-            value: Param::Container(Container::Struct(vec![
-                icon_name, pixmaps, title, text,
-            ])),
-        })));
+        let variant: Param =
+            Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+                sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+                value: Param::Container(Container::Struct(vec![icon_name, pixmaps, title, text])),
+            })));
 
         let tooltip = extract_tooltip_from_param(&variant);
         assert_eq!(tooltip.icon_name, "");
@@ -502,13 +515,14 @@ mod tests {
     #[test]
     fn tooltip_parse_short_struct_returns_default() {
         // Only 2 fields, need 4
-        let variant: Param = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
-            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
-            value: Param::Container(Container::Struct(vec![
-                Param::Base(PBase::StringRef("a")),
-                Param::Base(PBase::StringRef("b")),
-            ])),
-        })));
+        let variant: Param =
+            Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+                sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+                value: Param::Container(Container::Struct(vec![
+                    Param::Base(PBase::StringRef("a")),
+                    Param::Base(PBase::StringRef("b")),
+                ])),
+            })));
         let tooltip = extract_tooltip_from_param(&variant);
         assert_eq!(tooltip, ToolTip::default());
     }
@@ -543,25 +557,30 @@ mod tests {
             Param::Container(Container::Array(rustbus::params::Array {
                 element_sig: rustbus::signature::Type::Base(rustbus::signature::Base::Byte),
                 values: vec![
-                    Param::Base(PBase::Byte(0x11)), Param::Base(PBase::Byte(0x22)),
-                    Param::Base(PBase::Byte(0x33)), Param::Base(PBase::Byte(0x44)),
-                    Param::Base(PBase::Byte(0x55)), Param::Base(PBase::Byte(0x66)),
-                    Param::Base(PBase::Byte(0x77)), Param::Base(PBase::Byte(0x88)),
+                    Param::Base(PBase::Byte(0x11)),
+                    Param::Base(PBase::Byte(0x22)),
+                    Param::Base(PBase::Byte(0x33)),
+                    Param::Base(PBase::Byte(0x44)),
+                    Param::Base(PBase::Byte(0x55)),
+                    Param::Base(PBase::Byte(0x66)),
+                    Param::Base(PBase::Byte(0x77)),
+                    Param::Base(PBase::Byte(0x88)),
                 ],
             })),
         ]));
-        let variant: Param = Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
-            sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
-            value: Param::Container(Container::Struct(vec![
-                Param::Base(PBase::StringRef("")),
-                Param::Container(Container::Array(rustbus::params::Array {
-                    element_sig: sig_icon_array(),
-                    values: vec![pixel_1x1, pixel_2x1],
-                })),
-                Param::Base(PBase::StringRef("")),
-                Param::Base(PBase::StringRef("")),
-            ])),
-        })));
+        let variant: Param =
+            Param::Container(Container::Variant(Box::new(rustbus::params::Variant {
+                sig: rustbus::signature::Type::Base(rustbus::signature::Base::String),
+                value: Param::Container(Container::Struct(vec![
+                    Param::Base(PBase::StringRef("")),
+                    Param::Container(Container::Array(rustbus::params::Array {
+                        element_sig: sig_icon_array(),
+                        values: vec![pixel_1x1, pixel_2x1],
+                    })),
+                    Param::Base(PBase::StringRef("")),
+                    Param::Base(PBase::StringRef("")),
+                ])),
+            })));
 
         let tooltip = extract_tooltip_from_param(&variant);
         let px = tooltip.icon_pixmap.unwrap();
@@ -583,19 +602,41 @@ mod tests {
             icon_theme_path: "/usr/share/icons/hicolor".to_owned(),
             icon_name: String::new(),
             icon_pixmaps: vec![
-                IconPixmap { width: 16, height: 16, data: vec![0; 16*16*4] },
-                IconPixmap { width: 32, height: 32, data: vec![0; 32*32*4] },
-                IconPixmap { width: 24, height: 24, data: vec![0; 24*24*4] },
+                IconPixmap {
+                    width: 16,
+                    height: 16,
+                    data: vec![0; 16 * 16 * 4],
+                },
+                IconPixmap {
+                    width: 32,
+                    height: 32,
+                    data: vec![0; 32 * 32 * 4],
+                },
+                IconPixmap {
+                    width: 24,
+                    height: 24,
+                    data: vec![0; 24 * 24 * 4],
+                },
             ],
             attention_icon_name: String::new(),
-            attention_icon_pixmaps: vec![
-                IconPixmap { width: 16, height: 16, data: vec![0; 16*16*4] },
-            ],
+            attention_icon_pixmaps: vec![IconPixmap {
+                width: 16,
+                height: 16,
+                data: vec![0; 16 * 16 * 4],
+            }],
             attention_movie_name: String::new(),
             overlay_icon_name: String::new(),
             overlay_icon_pixmaps: vec![
-                IconPixmap { width: 8, height: 8, data: vec![0; 8*8*4] },
-                IconPixmap { width: 22, height: 22, data: vec![0; 22*22*4] },
+                IconPixmap {
+                    width: 8,
+                    height: 8,
+                    data: vec![0; 8 * 8 * 4],
+                },
+                IconPixmap {
+                    width: 22,
+                    height: 22,
+                    data: vec![0; 22 * 22 * 4],
+                },
             ],
             item_is_menu: false,
             menu_path: "/MenuBar".to_owned(),
@@ -656,7 +697,10 @@ mod tests {
     fn icon_search_paths_with_theme() {
         let item = make_test_item();
         let paths = item.icon_search_paths();
-        assert_eq!(paths, vec!["/usr/share/icons/hicolor", "/usr/share/pixmaps"]);
+        assert_eq!(
+            paths,
+            vec!["/usr/share/icons/hicolor", "/usr/share/pixmaps"]
+        );
     }
 
     #[test]

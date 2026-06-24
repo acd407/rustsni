@@ -48,7 +48,10 @@ impl IconPixmap {
 /// pixel data (e.g. from a decoded image file) and don't want to build
 /// `rustbus::params::Param` trees manually.
 pub fn from_tuples(tuples: &[(i32, i32, &[u8])]) -> Vec<IconPixmap> {
-    tuples.iter().filter_map(|&(w, h, raw)| IconPixmap::from_argb32be(w, h, raw)).collect()
+    tuples
+        .iter()
+        .filter_map(|&(w, h, raw)| IconPixmap::from_argb32be(w, h, raw))
+        .collect()
 }
 
 #[cfg(test)]

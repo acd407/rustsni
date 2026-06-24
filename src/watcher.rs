@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 
-use rustbus::connection::ll_conn::DuplexConn;
 use rustbus::connection::Timeout;
+use rustbus::connection::ll_conn::DuplexConn;
 use rustbus::message_builder::MarshalledMessage;
 use rustbus::standard_messages;
 
@@ -86,14 +86,17 @@ pub fn register(conn: &mut DuplexConn) -> Result<()> {
     conn.send.send_message_write_all(&add_match)?;
 
     // Subscribe to dbusmenu signals (LayoutUpdated, ItemsPropertiesUpdated)
-    let add_match = standard_messages::add_match(
-        "type='signal',interface='com.canonical.dbusmenu'",
-    );
+    let add_match =
+        standard_messages::add_match("type='signal',interface='com.canonical.dbusmenu'");
     conn.send.send_message_write_all(&add_match)?;
 
     // Emit StatusNotifierHostRegistered to notify existing items
     let sig = rustbus::MessageBuilder::new()
-        .signal(WATCHER_INTERFACE, "StatusNotifierHostRegistered", WATCHER_PATH)
+        .signal(
+            WATCHER_INTERFACE,
+            "StatusNotifierHostRegistered",
+            WATCHER_PATH,
+        )
         .build();
     conn.send.send_message_write_all(&sig)?;
 
@@ -158,7 +161,6 @@ fn handle_watcher_call(
             // Read item properties from the bus
             match TrayItem::from_bus_get_all(conn, &service_id, &bus_name, &object_path, pending) {
                 Ok(item) => {
-        
                     // Deduplicate: if this bus_name is already known (e.g. from step 3
                     // unique-name probe), skip the insert but still emit ItemChanged.
                     let is_new = !items.contains_key(&ItemId(service_id.clone()))
@@ -171,13 +173,16 @@ fn handle_watcher_call(
 
                     // Emit StatusNotifierItemRegistered signal
                     let mut sig = rustbus::MessageBuilder::new()
-                        .signal(WATCHER_INTERFACE, "StatusNotifierItemRegistered", WATCHER_PATH)
+                        .signal(
+                            WATCHER_INTERFACE,
+                            "StatusNotifierItemRegistered",
+                            WATCHER_PATH,
+                        )
                         .build();
                     sig.body.push_param(&service_id as &str).unwrap();
                     conn.send.send_message_write_all(&sig)?;
                 }
-                Err(_e) => {
-                }
+                Err(_e) => {}
             }
 
             // Send empty reply
@@ -245,7 +250,7 @@ fn handle_properties_call(
             let mut reply = msg.dynheader.make_response();
             let names: Vec<&str> = items.keys().map(|id| id.0.as_str()).collect();
             // Build a dict of all watcher properties: a{sv}
-            use rustbus::params::{Base as PBase, Container, DictMap, Dict, Param};
+            use rustbus::params::{Base as PBase, Container, Dict, DictMap, Param};
             use rustbus::signature::{Base as SBase, Container as SContainer, Type};
             let mut dict = DictMap::new();
             dict.insert(
@@ -254,7 +259,10 @@ fn handle_properties_call(
                     sig: Type::Container(SContainer::Array(Box::new(Type::Base(SBase::String)))),
                     value: Param::Container(Container::Array(rustbus::params::Array {
                         element_sig: Type::Base(SBase::String),
-                        values: names.into_iter().map(|n| Param::Base(PBase::StringRef(n))).collect(),
+                        values: names
+                            .into_iter()
+                            .map(|n| Param::Base(PBase::StringRef(n)))
+                            .collect(),
                     })),
                 }))),
             );
@@ -272,11 +280,14 @@ fn handle_properties_call(
                     value: Param::Base(PBase::Int32(0)),
                 }))),
             );
-            reply.body.push_old_param(&Param::Container(Container::Dict(Dict {
-                key_sig: SBase::String,
-                value_sig: Type::Container(SContainer::Variant),
-                map: dict,
-            }))).unwrap();
+            reply
+                .body
+                .push_old_param(&Param::Container(Container::Dict(Dict {
+                    key_sig: SBase::String,
+                    value_sig: Type::Container(SContainer::Variant),
+                    map: dict,
+                })))
+                .unwrap();
             conn.send.send_message_write_all(&reply)?;
         }
         _ => {
@@ -317,7 +328,11 @@ pub fn handle_signal(
 
                 // Emit StatusNotifierItemUnregistered signal
                 let mut sig = rustbus::MessageBuilder::new()
-                    .signal(WATCHER_INTERFACE, "StatusNotifierItemUnregistered", WATCHER_PATH)
+                    .signal(
+                        WATCHER_INTERFACE,
+                        "StatusNotifierItemUnregistered",
+                        WATCHER_PATH,
+                    )
                     .build();
                 sig.body.push_param(service_id.as_str()).unwrap();
                 conn.send.send_message_write_all(&sig)?;
@@ -337,8 +352,7 @@ pub fn handle_signal(
                         items.insert(id.clone(), item);
                         events.push(TrayEvent::ItemChanged(id));
                     }
-                    Err(_e) => {
-                    }
+                    Err(_e) => {}
                 }
             }
         }
@@ -410,10 +424,7 @@ pub fn discover_existing_items(
     };
 
     // Collect unique names for async probing (one per poll() call)
-    let pending: Vec<String> = names.into_iter()
-        .filter(|n| n.starts_with(":1."))
-        .collect();
-
+    let pending: Vec<String> = names.into_iter().filter(|n| n.starts_with(":1.")).collect();
 
     Ok(pending)
 }
@@ -430,7 +441,10 @@ fn parse_service(sender: &str, service: &str) -> (String, String) {
     } else if let Some(slash) = service.find('/') {
         (service[..slash].to_owned(), service[slash..].to_owned())
     } else {
-        (normalize_item_name(service), "/StatusNotifierItem".to_owned())
+        (
+            normalize_item_name(service),
+            "/StatusNotifierItem".to_owned(),
+        )
     }
 }
 
