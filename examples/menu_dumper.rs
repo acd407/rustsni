@@ -9,7 +9,7 @@
 ///   cargo run --example menu_dumper -- --address org.kde.StatusNotifierItem-2-1
 
 use rustsni::{ItemId, TrayHost};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn main() {
     let (filter_key, filter_val) = parse_args_or_exit();
@@ -23,10 +23,9 @@ fn main() {
     };
 
     // ── Locate the item ───────────────────────────────────────────
-    // When the user provides a D-Bus address we can fetch the item
-    // immediately without waiting for async discovery.
     let item_id = match filter_key {
         "address" => {
+            // We know the bus name — fetch immediately.
             match host.add_item(&filter_val, "/StatusNotifierItem") {
                 Ok(id) => id,
                 Err(e) => {
@@ -36,26 +35,37 @@ fn main() {
             }
         }
         "id" => {
-            // We need to know the bus name to fetch directly, so
-            // fall back to async discovery.  The library probes one
-            // unique name per poll() call, so this may take a while
-            // on a busy bus.
-            let start = Instant::now();
-            loop {
-                if let Some(id) = find_item_by_id(&host, &filter_val) {
-                    break id;
-                }
-                let _ = host.poll();
-                if start.elapsed() > Duration::from_secs(10) {
-                    eprintln!("error: item id \"{filter_val}\" not found within 10 s");
-                    eprintln!("  known items:");
-                    for (id, item) in host.items() {
-                        eprintln!("    {id}  id=\"{}\"  bus=\"{}\"",
-                            item.item_id, item.bus_name);
+            // Scan all unique names synchronously, then check cache.
+            let _ = host.scan_blocking(200);
+
+            match find_item_by_id(&host, &filter_val) {
+                Some(id) => id,
+                None => {
+                    // Not found via scan — wait a bit for lazy
+                    // registration, then give up.
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    let mut found = None;
+                    while std::time::Instant::now() < deadline {
+                        let _ = host.poll();
+                        if let Some(id) = find_item_by_id(&host, &filter_val) {
+                            found = Some(id);
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
                     }
-                    std::process::exit(1);
+                    match found {
+                        Some(id) => id,
+                        None => {
+                            eprintln!("error: item id \"{filter_val}\" not found");
+                            eprintln!("  known items:");
+                            for (id, item) in host.items() {
+                                eprintln!("    {id}  id=\"{}\"  bus=\"{}\"",
+                                    item.item_id, item.bus_name);
+                            }
+                            std::process::exit(1);
+                        }
+                    }
                 }
-                std::thread::sleep(Duration::from_millis(50));
             }
         }
         _ => unreachable!(),

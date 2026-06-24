@@ -1,15 +1,17 @@
 /// A minimal StatusNotifierItem watcher.
 ///
-/// Starts a TrayHost, polls the session bus to discover tray items, and
-/// prints their properties. Keeps polling until at least one item is
-/// found, then interacts with it and exits.
+/// Starts a TrayHost, discovers tray items, prints their properties,
+/// then interacts with the first one and exits.
+///
+/// Uses [`TrayHost::scan_blocking`] for fast initial discovery — probes
+/// all D-Bus unique names synchronously (hundreds of names in under a
+/// second on a typical system).
 ///
 /// Usage:
 ///   cargo run --example simple_watcher
 
-use rustsni::{ItemId, TrayEvent, TrayHost};
-use std::os::fd::AsRawFd;
-use std::time::{Duration, Instant};
+use rustsni::{ItemId, TrayHost};
+use std::time::Duration;
 
 fn main() {
     let mut host = match TrayHost::new() {
@@ -21,131 +23,105 @@ fn main() {
         }
     };
 
-    println!("tray host started (fd={})", host.fd().as_raw_fd());
+    // ── Fast scan ─────────────────────────────────────────────────
+    // Scan all pending unique names synchronously, 200 ms per name.
+    // On a typical bus with ~100 names this finishes in a few seconds at
+    // most; most names return an error immediately (not SNI items), so
+    // the real wall-clock time is usually much less.
+    let found = match host.scan_blocking(200) {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("scan error: {e}");
+            Vec::new()
+        }
+    };
 
-    // ── Discovery ──────────────────────────────────────────────────
-    // The library discovers already-running items by probing D-Bus
-    // unique names (:1.xxx) one per poll() call — an async, non-blocking
-    // handshake. On a busy bus with many services this may take dozens
-    // or hundreds of rounds to reach the names that host tray items.
-    //
-    // Loop until we find something or hit a timeout.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut last_progress = String::new();
-
-    loop {
-        flush_events(&mut host);
-        let known = host.items().len();
-
-        if known > 0 {
-            println!("\nfound {known} tray item(s):");
-            for (id, item) in host.items() {
-                print_item(id, item);
+    // Continue polling for items that may register after our scan
+    // (e.g. lazy-starting applications).  Give them a short window.
+    if found.is_empty() {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if let Ok(events) = host.poll() {
+                for ev in &events {
+                    if matches!(ev, rustsni::TrayEvent::ItemAdded(_)) {
+                        // found via async registration
+                    }
+                }
+                if !host.items().is_empty() {
+                    break;
+                }
             }
-            break;
+            std::thread::sleep(Duration::from_millis(50));
         }
-
-        // Print a progress dot every ~2 s so the user knows we're probing.
-        let elapsed = Instant::now().duration_since(deadline - Duration::from_secs(10));
-        let tick = format!("{:4}s", elapsed.as_secs());
-        if tick != last_progress {
-            last_progress = tick.clone();
-            print!("\r  probing… {tick}");
-            std::io::Write::flush(&mut std::io::stdout()).ok();
-        }
-
-        if Instant::now() >= deadline {
-            println!("\n  timeout — no tray items discovered.");
-            println!("  (items may have registered after the probe window, or");
-            println!("   this bus may have no SNI providers running.)");
-            break;
-        }
-
-        // Give D-Bus time to deliver the next probe reply.
-        std::thread::sleep(Duration::from_millis(50));
     }
 
-    println!();
+    // ── Print items ───────────────────────────────────────────────
+    let items = host.items();
+    if items.is_empty() {
+        println!("no tray items found.");
+        return;
+    }
 
-    // ── Interaction ────────────────────────────────────────────────
-    // Activate the first discovered item and dump its menu tree.
-    let first: Option<(ItemId, String)> = host
+    println!("found {} tray item(s):", items.len());
+    for (id, item) in items {
+        print!("  {id:<55}");
+        if let Some(best) = item.best_icon_pixmap() {
+            print!(" icon={}x{}", best.width, best.height);
+        } else if !item.icon_name.is_empty() {
+            print!(" icon=\"{}\"", item.icon_name);
+        }
+        if !item.title.is_empty() {
+            print!("  \"{}\"", item.title);
+        }
+        print!("  [{}]", item.status);
+        if item.has_menu() {
+            print!("  ☰");
+        }
+        println!();
+    }
+
+    // ── Interact with first item ──────────────────────────────────
+    let first: Vec<(ItemId, String)> = host
         .items()
         .iter()
-        .next()
-        .map(|(id, item)| (id.clone(), item.menu_path.clone()));
+        .take(1)
+        .map(|(id, item)| (id.clone(), item.menu_path.clone()))
+        .collect();
 
-    if let Some((id, menu_path)) = first {
-        println!("activating first item: {id}");
+    if let Some((id, menu_path)) = first.into_iter().next() {
+        println!("\nactivating: {id}");
         let _ = host.activate(&id, 0, 0);
-
         if !menu_path.is_empty() && menu_path != "/" {
-            println!("  menu at {menu_path}");
             if let Ok(nodes) = host.get_menu(&id, 0) {
+                println!("menu:");
                 print_menu(&nodes, 2);
             }
         }
     }
 
-    // ── Shutdown ───────────────────────────────────────────────────
+    // ── Shutdown ──────────────────────────────────────────────────
     let _ = host.shutdown();
     println!("done");
 }
 
-/// Poll for events and print them.
-fn flush_events(host: &mut TrayHost) -> bool {
-    match host.poll() {
-        Ok(events) => {
-            let n = events.len();
-            for ev in &events {
-                match ev {
-                    TrayEvent::ItemAdded(id) => println!("\n  + {id} added"),
-                    TrayEvent::ItemChanged(id) => println!("\n  ~ {id} changed"),
-                    TrayEvent::ItemRemoved(id) => println!("\n  - {id} removed"),
-                    TrayEvent::MenuChanged(id) => println!("\n  ☰ {id} menu changed"),
-                    TrayEvent::MenuActivationRequested(id) => {
-                        println!("\n  ☰ {id} menu activation requested")
-                    }
-                    TrayEvent::HostShutdown => println!("\n  ⏹ host shutdown"),
-                }
-            }
-            n > 0
-        }
-        Err(e) => {
-            eprintln!("\npoll error: {e}");
-            false
-        }
-    }
-}
-
-/// Print a summary line for a tray item.
-fn print_item(id: &ItemId, item: &rustsni::TrayItem) {
-    print!("  {id:<55}");
-    if let Some(best) = item.best_icon_pixmap() {
-        print!(" icon={}x{}", best.width, best.height);
-    } else if !item.icon_name.is_empty() {
-        print!(" icon=\"{}\"", item.icon_name);
-    }
-    if !item.title.is_empty() {
-        print!("  \"{}\"", item.title);
-    }
-    print!("  [{}]", item.status);
-    if item.has_menu() {
-        print!("  ☰");
-    }
-    println!();
-}
-
-/// Recursively print a menu node tree.
 fn print_menu(nodes: &[rustsni::MenuNode], indent: usize) {
     for node in nodes {
         let pfx = " ".repeat(indent);
+        if node.label.is_empty() && node.children.is_empty() {
+            println!("{pfx}──────────────────");
+            continue;
+        }
         let label = if node.enabled {
             node.label.clone()
         } else {
             format!("({})", node.label)
         };
-        println!("{pfx}{label}");
+        let toggle = match node.toggle_type.as_str() {
+            "checkmark" => format!(" [{}]", node.toggle_state),
+            "radio" => format!(" [radio={}]", node.toggle_state),
+            _ => String::new(),
+        };
+        println!("{pfx}{label}{toggle}");
         if !node.children.is_empty() {
             print_menu(&node.children, indent + 2);
         }

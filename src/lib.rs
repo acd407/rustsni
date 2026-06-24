@@ -429,6 +429,91 @@ impl TrayHost {
         Ok(id)
     }
 
+    /// Synchronously scan all pending unique names for SNI items.
+    ///
+    /// Drains the internal list of pending unique names (from
+    /// `ListNames` at startup) and probes each with a blocking
+    /// `Properties.GetAll` call, respecting `name_timeout_ms` per name.
+    ///
+    /// This is much faster than the async one-per-`poll()` probing
+    /// because it doesn't wait for inter-poll intervals. Names that
+    /// don't respond within the timeout are silently skipped.
+    ///
+    /// Discovered items are inserted into the cache. Messages that
+    /// arrive during the scan but belong to other D-Bus interactions
+    /// are buffered for the next [`poll()`](Self::poll).
+    ///
+    /// # Returns
+    ///
+    /// The [`ItemId`]s of newly discovered items.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Bus`] on D-Bus I/O errors.
+    pub fn scan_blocking(&mut self, name_timeout_ms: u32) -> Result<Vec<ItemId>> {
+        use rustbus::message_builder::MessageType;
+        use rustbus::connection::Timeout;
+
+        let names: Vec<String> = std::mem::take(&mut self.pending_unique_names);
+        // Also clear retry state — we've covered them all now.
+        self.pending_unique_retries.clear();
+        let mut discovered = Vec::new();
+
+        for name in &names {
+            let object_path = "/StatusNotifierItem";
+            let serial = match item::TrayItem::send_get_all(&mut self.conn, name, object_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(name_timeout_ms as u64);
+
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break; // per-name timeout
+                }
+
+                match self
+                    .conn
+                    .recv
+                    .get_next_message(Timeout::Duration(remaining.min(std::time::Duration::from_millis(50))))
+                {
+                    Ok(msg) => {
+                        if msg.dynheader.response_serial == Some(serial) {
+                            match msg.typ {
+                                MessageType::Reply => {
+                                    if let Ok(item) = item::TrayItem::from_get_all_reply(
+                                        &msg, name, name, object_path,
+                                    ) {
+                                        let id = item.id.clone();
+                                        self.items.insert(id.clone(), item);
+                                        discovered.push(id);
+                                    }
+                                }
+                                MessageType::Error => {
+                                    // Not an SNI item — skip.
+                                }
+                                _ => {}
+                            }
+                            break;
+                        }
+                        // Not our reply — buffer for poll().
+                        self.pending_messages.push_back(msg);
+                    }
+                    Err(rustbus::connection::Error::TimedOut) => continue,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+
+        // Cancel any in-flight async probe since we've scanned everything.
+        self.probe_serial = None;
+
+        Ok(discovered)
+    }
+
     /// Call the item's `Activate` method.
     ///
     /// # Errors
