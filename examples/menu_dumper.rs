@@ -36,7 +36,7 @@ fn main() {
         }
         "id" => {
             // Scan all unique names synchronously, then check cache.
-            let _ = host.scan_blocking(200);
+            let _ = host.scan_blocking(1000);
 
             match find_item_by_id(&host, &filter_val) {
                 Some(id) => id,

@@ -24,11 +24,11 @@ fn main() {
     };
 
     // ── Fast scan ─────────────────────────────────────────────────
-    // Scan all pending unique names synchronously, 200 ms per name.
-    // On a typical bus with ~100 names this finishes in a few seconds at
-    // most; most names return an error immediately (not SNI items), so
-    // the real wall-clock time is usually much less.
-    let found = match host.scan_blocking(200) {
+    // Scan all pending unique names synchronously (batch probe).
+    // With a 1-second overall timeout this finishes in ~100 ms on
+    // a typical system because non-SNI services reply instantly with
+    // an error.
+    let found = match host.scan_blocking(1000) {
         Ok(ids) => ids,
         Err(e) => {
             eprintln!("scan error: {e}");

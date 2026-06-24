@@ -431,17 +431,14 @@ impl TrayHost {
 
     /// Synchronously scan all pending unique names for SNI items.
     ///
-    /// Drains the internal list of pending unique names (from
-    /// `ListNames` at startup) and probes each with a blocking
-    /// `Properties.GetAll` call, respecting `name_timeout_ms` per name.
+    /// Sends `Properties.GetAll` to **all** pending unique names at once,
+    /// then collects replies within a single overall timeout. This is
+    /// significantly faster than the async one-per-`poll()` probing,
+    /// especially on buses with many non-SNI services (typical case).
     ///
-    /// This is much faster than the async one-per-`poll()` probing
-    /// because it doesn't wait for inter-poll intervals. Names that
-    /// don't respond within the timeout are silently skipped.
-    ///
-    /// Discovered items are inserted into the cache. Messages that
-    /// arrive during the scan but belong to other D-Bus interactions
-    /// are buffered for the next [`poll()`](Self::poll).
+    /// Discovered items are inserted into the cache. Messages that arrive
+    /// during the scan but belong to other D-Bus interactions are buffered
+    /// for the next [`poll()`](Self::poll).
     ///
     /// # Returns
     ///
@@ -450,67 +447,83 @@ impl TrayHost {
     /// # Errors
     ///
     /// Returns [`Error::Bus`] on D-Bus I/O errors.
-    pub fn scan_blocking(&mut self, name_timeout_ms: u32) -> Result<Vec<ItemId>> {
-        use rustbus::message_builder::MessageType;
+    pub fn scan_blocking(&mut self, overall_timeout_ms: u32) -> Result<Vec<ItemId>> {
         use rustbus::connection::Timeout;
+        use rustbus::message_builder::MessageType;
 
         let names: Vec<String> = std::mem::take(&mut self.pending_unique_names);
-        // Also clear retry state — we've covered them all now.
         self.pending_unique_retries.clear();
-        let mut discovered = Vec::new();
 
+        // Fire GetAll at every unique name in one batch.
+        let mut probes: Vec<(String, u32)> = Vec::new(); // (name, serial)
         for name in &names {
-            let object_path = "/StatusNotifierItem";
-            let serial = match item::TrayItem::send_get_all(&mut self.conn, name, object_path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            let deadline =
-                std::time::Instant::now() + std::time::Duration::from_millis(name_timeout_ms as u64);
-
-            loop {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    break; // per-name timeout
-                }
-
-                match self
-                    .conn
-                    .recv
-                    .get_next_message(Timeout::Duration(remaining.min(std::time::Duration::from_millis(50))))
-                {
-                    Ok(msg) => {
-                        if msg.dynheader.response_serial == Some(serial) {
-                            match msg.typ {
-                                MessageType::Reply => {
-                                    if let Ok(item) = item::TrayItem::from_get_all_reply(
-                                        &msg, name, name, object_path,
-                                    ) {
-                                        let id = item.id.clone();
-                                        self.items.insert(id.clone(), item);
-                                        discovered.push(id);
-                                    }
-                                }
-                                MessageType::Error => {
-                                    // Not an SNI item — skip.
-                                }
-                                _ => {}
-                            }
-                            break;
-                        }
-                        // Not our reply — buffer for poll().
-                        self.pending_messages.push_back(msg);
-                    }
-                    Err(rustbus::connection::Error::TimedOut) => continue,
-                    Err(e) => return Err(e.into()),
-                }
+            if let Ok(serial) =
+                item::TrayItem::send_get_all(&mut self.conn, name, "/StatusNotifierItem")
+            {
+                probes.push((name.clone(), serial));
             }
         }
 
-        // Cancel any in-flight async probe since we've scanned everything.
-        self.probe_serial = None;
+        if probes.is_empty() {
+            self.probe_serial = None;
+            return Ok(Vec::new());
+        }
 
+        // Collect replies until all are received or the overall timeout
+        // expires.  Most non-SNI services reply immediately with an error,
+        // so the wall-clock time is usually well under the timeout.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(overall_timeout_ms as u64);
+        let mut remaining = probes;
+        let mut discovered = Vec::new();
+
+        while !remaining.is_empty() {
+            let timeout = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .max(std::time::Duration::from_millis(1));
+
+            match self.conn.recv.get_next_message(Timeout::Duration(timeout)) {
+                Ok(msg) => {
+                    // Check if this reply matches one of our probes.
+                    let mut matched = None;
+                    for (i, (_, serial)) in remaining.iter().enumerate() {
+                        if msg.dynheader.response_serial == Some(*serial) {
+                            matched = Some(i);
+                            break;
+                        }
+                    }
+                    if let Some(idx) = matched {
+                        let (name, _) = remaining.swap_remove(idx);
+                        if msg.typ == MessageType::Reply {
+                            if let Ok(item) = item::TrayItem::from_get_all_reply(
+                                &msg,
+                                &name,
+                                &name,
+                                "/StatusNotifierItem",
+                            ) {
+                                let id = item.id.clone();
+                                self.items.insert(id.clone(), item);
+                                discovered.push(id);
+                            }
+                        }
+                        // Error reply means "not an SNI item" — silently skip.
+                    } else {
+                        // Not our probe — buffer for poll().
+                        self.pending_messages.push_back(msg);
+                    }
+                }
+                Err(rustbus::connection::Error::TimedOut) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // Timeout-expired probes: re-queue their names so they get
+        // retried on a future poll() if the reply arrives late.
+        for (name, _) in &remaining {
+            self.pending_unique_names.push(name.clone());
+        }
+
+        self.probe_serial = None;
         Ok(discovered)
     }
 
