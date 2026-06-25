@@ -30,45 +30,7 @@ use crate::{Result, TrayEvent};
 pub(crate) const WATCHER_INTERFACE: &str = "org.kde.StatusNotifierWatcher";
 pub(crate) const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 
-const WATCHER_INTROSPECT_XML: &str = r#"<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
- "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
-<node>
-  <interface name="org.kde.StatusNotifierWatcher">
-    <method name="RegisterStatusNotifierItem">
-      <arg name="service" type="s" direction="in"/>
-    </method>
-    <method name="RegisterStatusNotifierHost">
-      <arg name="service" type="s" direction="in"/>
-    </method>
-    <property name="RegisteredStatusNotifierItems" type="as" access="read"/>
-    <property name="IsStatusNotifierHostRegistered" type="b" access="read"/>
-    <property name="ProtocolVersion" type="i" access="read"/>
-    <signal name="StatusNotifierItemRegistered">
-      <arg type="s"/>
-    </signal>
-    <signal name="StatusNotifierItemUnregistered">
-      <arg type="s"/>
-    </signal>
-    <signal name="StatusNotifierHostRegistered"/>
-    <signal name="StatusNotifierHostUnregistered"/>
-  </interface>
-  <interface name="org.freedesktop.DBus.Properties">
-    <method name="Get">
-      <arg name="interface" type="s" direction="in"/>
-      <arg name="property" type="s" direction="in"/>
-      <arg name="value" type="v" direction="out"/>
-    </method>
-    <method name="GetAll">
-      <arg name="interface" type="s" direction="in"/>
-      <arg name="properties" type="a{sv}" direction="out"/>
-    </method>
-  </interface>
-  <interface name="org.freedesktop.DBus.Introspectable">
-    <method name="Introspect">
-      <arg name="xml" type="s" direction="out"/>
-    </method>
-  </interface>
-</node>"#;
+const WATCHER_INTROSPECT_XML: &str = include_str!("../protocols/org.kde.StatusNotifierWatcher.xml");
 
 /// Request the watcher bus names and set up signal subscriptions.
 pub fn register(conn: &mut DuplexConn) -> Result<()> {
@@ -138,19 +100,39 @@ pub fn handle_call(
     let member = msg.dynheader.member.as_deref().unwrap_or("");
     let object = msg.dynheader.object.as_deref().unwrap_or("");
 
+    // Handle Introspectable on any object path (D-Bus spec requirement).
+    // The dbus-daemon and bus clients often introspect "/" to discover
+    // available object trees.
+    if iface == "org.freedesktop.DBus.Introspectable" && member == "Introspect" {
+        let xml = if object == WATCHER_PATH {
+            WATCHER_INTROSPECT_XML
+        } else {
+            r#"<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <node name="StatusNotifierWatcher"/>
+</node>"#
+        };
+        let mut reply = msg.dynheader.make_response();
+        reply.body.push_param(xml).unwrap();
+        conn.send.send_message_write_all(&reply)?;
+        return Ok(());
+    }
+
     if object != WATCHER_PATH {
+        let err = msg.dynheader.make_error_response(
+            "org.freedesktop.DBus.Error.UnknownObject".to_owned(),
+            Some(format!(
+                "This service does not implement the object path: {object}"
+            )),
+        );
+        conn.send.send_message_write_all(&err)?;
         return Ok(());
     }
 
     match iface {
         WATCHER_INTERFACE => handle_watcher_call(conn, msg, member, items, events, pending),
         "org.freedesktop.DBus.Properties" => handle_properties_call(conn, msg, member, items),
-        "org.freedesktop.DBus.Introspectable" => {
-            let mut reply = msg.dynheader.make_response();
-            reply.body.push_param(WATCHER_INTROSPECT_XML).unwrap();
-            conn.send.send_message_write_all(&reply)?;
-            Ok(())
-        }
         _ => {
             let err = standard_messages::unknown_method(&msg.dynheader);
             conn.send.send_message_write_all(&err)?;
