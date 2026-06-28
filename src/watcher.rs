@@ -198,6 +198,13 @@ fn handle_watcher_call(
             let reply = msg.dynheader.make_response();
             conn.send.send_message_write_all(&reply)?;
         }
+        "GetHostServiceName" => {
+            let mut reply = msg.dynheader.make_response();
+            let host_name =
+                format!("org.freedesktop.StatusNotifierHost-{}", std::process::id());
+            reply.body.push_param(host_name.as_str()).unwrap();
+            conn.send.send_message_write_all(&reply)?;
+        }
         _ => {
             let err = standard_messages::unknown_method(&msg.dynheader);
             conn.send.send_message_write_all(&err)?;
