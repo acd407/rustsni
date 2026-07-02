@@ -654,7 +654,6 @@ impl TrayHost {
                     &mut self.items,
                     events,
                     &mut self.pending_messages,
-                    &mut self.pending_unique_names,
                 )?;
             }
             MessageType::Call => {
