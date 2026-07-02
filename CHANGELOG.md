@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.1] — 2026-07-02
+
+### Fixed
+
+- `GetHostServiceName` is now implemented, preventing crashes in tray items that query the host's service name.
+- All D-Bus method calls now receive a reply; previously some calls (notably on `/`) would hang the caller until timeout.
+- Remove `if-let` chains for MSRV 1.85 compatibility.
+- Resolve CI warnings — bump `actions/checkout` to v5, fix MSRV input name.
+
+### Changed
+
+- Remove `pending_unique_names` async probe mechanism to simplify the watcher startup sequence.
+
 ## [0.2.0] — 2026-06-24
 
 ### Added
