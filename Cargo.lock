@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "rustsni"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rustbus",
  "thiserror 2.0.18",
