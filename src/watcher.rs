@@ -9,9 +9,8 @@
 //!   `StatusNotifierItemUnregistered` signals so the host knows when to
 //!   update its tray representation.
 //!
-//! The watcher also probes already-running D-Bus services at startup
-//! (via `org.freedesktop.DBus.ListNames`) to catch items that started
-//! before the host.
+//! The watcher emits `StatusNotifierHostRegistered` at startup so that
+//! already-running items may re-register via `RegisterStatusNotifierItem`.
 //!
 //! Additionally it subscribes to:
 //! - `NameOwnerChanged` to detect items vanishing from the bus.
@@ -74,16 +73,6 @@ pub fn register(conn: &mut DuplexConn) -> Result<()> {
     let add_match =
         standard_messages::add_match("type='signal',interface='com.canonical.dbusmenu'");
     conn.send.send_message_write_all(&add_match)?;
-
-    // Emit StatusNotifierHostRegistered to notify existing items
-    let sig = rustbus::MessageBuilder::new()
-        .signal(
-            WATCHER_INTERFACE,
-            "StatusNotifierHostRegistered",
-            WATCHER_PATH,
-        )
-        .build();
-    conn.send.send_message_write_all(&sig)?;
 
     Ok(())
 }
@@ -153,7 +142,6 @@ fn handle_watcher_call(
         "RegisterStatusNotifierItem" => {
             let service: String = msg.body.parser().get()?;
             let sender = msg.dynheader.sender.as_deref().unwrap_or("");
-
             let (bus_name, object_path) = parse_service(sender, &service);
 
             // Build service_id: sender+path if only a path was given, else the raw service
@@ -397,47 +385,6 @@ pub fn handle_signal(
     }
 
     Ok(())
-}
-
-/// Scan D-Bus `ListNames` to collect all unique bus names for async probing.
-///
-/// Returns a list of unique bus names (`:1.xxx`) that should be probed for SNI
-/// support (one per `poll()` call). This discovers items that might have been
-/// running before the bar/watcher started and registered with just a path.
-///
-/// Non-ListNames messages arriving during the synchronous wait are buffered
-/// into `pending` so they are processed by the next `poll()` call instead of
-/// being silently dropped.
-pub fn discover_existing_items(
-    conn: &mut DuplexConn,
-    pending: &mut std::collections::VecDeque<rustbus::message_builder::MarshalledMessage>,
-) -> Result<Vec<String>> {
-    use rustbus::message_builder::MessageType;
-
-    // Call org.freedesktop.DBus.ListNames
-    let list_names = standard_messages::list_names();
-    let serial = conn.send.send_message_write_all(&list_names)?;
-
-    let reply = loop {
-        let msg = conn.recv.get_next_message(Timeout::Infinite)?;
-        if msg.typ == MessageType::Reply && msg.dynheader.response_serial == Some(serial) {
-            break msg;
-        }
-        // Not the ListNames reply — buffer for poll() to process later
-        pending.push_back(msg);
-    };
-
-    let names: Vec<String> = match reply.body.parser().get() {
-        Ok(n) => n,
-        Err(_e) => {
-            return Ok(Vec::new());
-        }
-    };
-
-    // Collect unique names for async probing (one per poll() call)
-    let pending: Vec<String> = names.into_iter().filter(|n| n.starts_with(":1.")).collect();
-
-    Ok(pending)
 }
 
 /// Split a raw SNI service registration string into `(bus_name, object_path)`.

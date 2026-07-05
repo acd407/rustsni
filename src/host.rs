@@ -12,7 +12,9 @@
 //! [SNI spec]: https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/
 
 use rustbus::connection::ll_conn::DuplexConn;
+use rustbus::message_builder::MarshalledMessage;
 use rustbus::standard_messages;
+use std::collections::VecDeque;
 
 use crate::Result;
 
@@ -21,22 +23,22 @@ use crate::Result;
 /// This acquires a unique well-known name so tray items know a host is
 /// present. The name is automatically released when the D-Bus connection
 /// is dropped.
-pub fn register(conn: &mut DuplexConn) -> Result<()> {
+///
+/// Unexpected D-Bus messages (e.g. `RegisterStatusNotifierItem` calls from
+/// items responding to `StatusNotifierHostRegistered`) arriving during the
+/// synchronous wait are buffered into `pending` for later processing.
+pub fn register(conn: &mut DuplexConn, pending: &mut VecDeque<MarshalledMessage>) -> Result<()> {
     let name = format!("org.freedesktop.StatusNotifierHost-{}", std::process::id());
     let msg = standard_messages::request_name(&name, 0);
     let serial = conn.send.send_message_write_all(&msg)?;
-    // Wait for the reply matching our serial; skip unrelated signals.
     loop {
         let resp = conn
             .recv
             .get_next_message(rustbus::connection::Timeout::Infinite)?;
         if resp.dynheader.response_serial == Some(serial) {
-            // Reply or Error — either way the name was claimed or already held
             break;
         }
-        if !matches!(resp.typ, rustbus::message_builder::MessageType::Signal) {
-            break; // unexpected — abort spin
-        }
+        pending.push_back(resp);
     }
     Ok(())
 }
