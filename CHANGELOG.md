@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.2] — 2026-07-07
+
+### Changed
+
+- Remove the active D-Bus probe (`ListNames` + `GetAll`) on startup. The
+  watcher now relies exclusively on `StatusNotifierHostRegistered` to
+  discover tray items. This eliminates the complex `pending_unique_names`
+  retry mechanism and simplifies the poll loop.
+- Emit `StatusNotifierHostRegistered` **after** `host::register()`
+  completes, so items see a fully-initialized watcher+host before
+  attempting to register.
+- Buffer unexpected D-Bus messages received during `host::register()` in
+  `pending_messages` instead of discarding them, preventing lost
+  `RegisterStatusNotifierItem` calls from fast-responding items.
+
 ## [0.2.1] — 2026-07-02
 
 ### Fixed
